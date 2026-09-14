@@ -1,0 +1,15 @@
+﻿# ESP32-S3-N16R8 分区表（16MB Flash）
+#
+# 为什么不用 IDF 自带的默认表：partitions_singleapp.csv 把 factory 写死为 1M，
+# 不随 Flash 容量变化，16MB 的板子会有 14MB 用不上。
+#
+# Offset 一列留空，由构建系统自动按 4KB 对齐排布，避免手算出错。
+# 排布结果：分区表 0x8000 → nvs 0x9000 → phy_init 0xF000 → factory 0x10000
+#
+# 将来若要支持 OTA，把 factory 换成 ota_0 / ota_1 两段并加 otadata 即可，
+# 例如：otadata 0x2000、ota_0 4M、ota_1 4M。
+
+# Name,     Type, SubType, Offset,  Size,   Flags
+nvs,        data, nvs,     ,        0x6000,
+phy_init,   data, phy,     ,        0x1000,
+factory,    app,  factory, ,        4M,

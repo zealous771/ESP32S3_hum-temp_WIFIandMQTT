@@ -11,20 +11,31 @@
 CONFIG_IDF_TARGET="esp32s3"
 
 # ---------- Flash 与烧录 ----------
-# 注意：这个值必须与板上实际 Flash 容量一致，否则分区表算出来的地址会越界
-CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y
-CONFIG_ESPTOOLPY_FLASHSIZE="2MB"
+# 板上实际为 16MB（N16R8）。这个值会写入镜像头，必须与硬件一致
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
 CONFIG_ESPTOOLPY_FLASHMODE="dio"
 
 # ---------- 分区表 ----------
-# 当前为单 app 方案（无 OTA）。将来要做 OTA 或自定义分区时，
-# 改为 CONFIG_PARTITION_TABLE_CUSTOM=y 并指向自己的 partitions.csv
-CONFIG_PARTITION_TABLE_SINGLE_APP=y
+# 使用工程内的 partitions.csv（factory 4MB），取代 IDF 默认的 1MB 单 app 表
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
 # ---------- CPU 与内存 ----------
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=160
+
+# ---------- 外部 PSRAM ----------
+# N16R8 的 8MB PSRAM 走 Octal（8 线）接口，S3 上只有 Octal 模式才认得出 8MB。
+# TYPE_AUTO 让 IDF 启动时自动探测容量，不写死型号。
+# USE_MALLOC 把 PSRAM 并入默认堆，malloc 在内部 RAM 不够时会自动回落使用它。
+# 注意：PSRAM 上的内存不能给 DMA 使用，且访问延迟高于内部 RAM。
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
 
 # ---------- 控制台与日志 ----------
 # UART0 @115200，与 .vscode/settings.json 里的 COM13 监视器一致

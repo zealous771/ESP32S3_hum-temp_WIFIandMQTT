@@ -32,5 +32,6 @@
     "--background-index",
     "--query-driver=**",
     "--compile-commands-dir=c:\\Users\\mgnwo\\Desktop\\wrok_place\\ESP32_project\\ESP32_learn\\My_ESP_learn\\build"
-  ]
+  ],
+  "idf.flashType": "JTAG"
 }
