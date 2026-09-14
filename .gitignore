@@ -1,0 +1,89 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Directory metadata
+.directory
+
+# Temporary files
+*~
+*.swp
+*.swo
+*.bak
+*.tmp
+
+# Log files
+*.log
+
+# Build artifacts and directories
+# build/ 已覆盖全部编译产物，下面只保留"任何位置都不该入库"的中间文件
+**/build/
+build/
+*.o
+*.out
+
+# For any host-side utilities compiled on Windows
+*.exe
+
+# 不再全局忽略 *.bin / *.elf / *.map / *.a / flasher_args.json。
+# 这些产物只出现在 build/ 下，已被上面的 build/ 规则覆盖；
+# 而全局模式会在将来引入需入库的固件 blob 或第三方静态库时静默忽略它们，难以排查。
+
+# sdkconfig 不入库：它是 3800+ 行的菜单快照，含大量未显式选择过的默认值。
+# 需要固化的关键配置写在 sdkconfig.defaults 里，那份文件要入库。
+# 若要改为直接提交 sdkconfig，删除下面这行即可（两者选其一，不要都做）。
+sdkconfig
+sdkconfig.old
+
+# ESP-IDF dependencies
+# For older versions or manual component management
+/components/.idf/
+**/components/.idf/
+# For modern ESP-IDF component manager
+managed_components/
+# If ESP-IDF tools are installed/referenced locally to the project
+.espressif/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+
+# Python environment files
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.egg-info/
+dist/
+
+# Virtual environment folders
+venv/
+.venv/
+env/
+
+# Language Servers
+# 带斜杠的写法只匹配目录，因此项目根的 .clangd 配置文件（单文件）会正常入库，这是期望行为
+.clangd/
+.ccls-cache/
+compile_commands.json
+
+# Windows specific
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# User-specific configuration files
+*.user
+
+# General workspace files, can be from various tools
+*.workspace
+
+# Visual Studio Solution User Options
+*.suo
+
+# Visual Studio
+*.sln.docstates
