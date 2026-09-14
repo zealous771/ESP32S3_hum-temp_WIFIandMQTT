@@ -1,10 +1,8 @@
 # 统一行尾为 LF。
 #
-# 原因：本工程在 Windows 上编辑，但 .devcontainer/ 提供的是 Linux 构建环境。
-# 系统级 core.autocrlf=true 会在检出时把文本文件改成 CRLF，带来两个问题：
-#   1. Linux 容器内挂载的 shell 脚本因 CRLF 而无法执行（\r 被当成命令的一部分）
-#   2. 每次检出都产生大量无意义的行尾变动，污染 diff
-# 显式固定为 LF 后，工作区与仓库内容一致，跨平台不再有歧义。
+# 原因：core.autocrlf 是机器级配置（本机系统级为 true，检出时会把文本转成 CRLF），
+# 固定为 LF 可消除这类机器差异，避免反复转换与无意义的 diff 噪音；
+# 同时为将来可能的 WSL / Linux CI / 共享给他人留出余量。
 * text=auto eol=lf
 
 # 二进制文件禁止任何行尾转换
