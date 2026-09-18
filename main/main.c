@@ -1,134 +1,160 @@
 /*
  * main.c —— 工程入口
  *
- * 这个文件的职责只有一个：把系统搭起来，然后让各个任务自己跑。
- * 具体功能不写在这里——那是组件的职责。
+ * 本示例演示 ESP-IDF 的"中断 + 任务间通信"标准模式：
  *
- * 对照 HAL：HAL 里 main() 是你的主战场，while(1) 里塞满了轮询逻辑。
- * ESP-IDF 里 app_main() 只是"启动脚本"，它本身也是一个 FreeRTOS 任务
- * （叫 main 任务），跑完就该退出，把舞台交给业务任务。
+ *     按键 GPIO ──中断──▶ ISR ──队列──▶ button_task ──队列──▶ blink_task ──▶ LED
+ *
+ * 两个队列各自承担不同职责：
+ *   button 组件内部的队列：传递"按下/松开"事件（ISR → 任务）
+ *   本文件里的 s_period_queue：传递"新的闪烁周期"（任务 → 任务）
+ *
+ * 其中 blink_task 的写法是本示例最值得琢磨的地方，见函数内注释。
  */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 
 #include "esp_err.h"
 #include "esp_log.h"
 
 #include "led.h"
+#include "button.h"
 
 static const char *TAG = "main";
 
+/* ---------- 硬件配置 ---------- */
+
 /*
- * LED 连接的 GPIO 编号。
- *
- * 这里用 #define 是为了让模板保持简单。更"IDF 风格"的做法是做成 Kconfig 选项，
- * 那样可以在 menuconfig 里改而不用动代码——官方 blink 示例就是这么做的：
- *   IDF_PATH/examples/get-started/blink/main/Kconfig.projbuild
- * 等你熟悉了这套流程再改造成 Kconfig 也不迟。
- *
- * 选引脚前必读：ESP32-S3 上不少引脚被固定用途占用，接了外设会出问题。
- *
- *   GPIO26 - 32    SPI0/1 总线，接板载 Flash
- *   GPIO33 - 37    八线（Octal）PSRAM 的额外数据线
- *                  —— 你的板子是 N16R8，PSRAM 是 8MB 八线模式，这 5 个脚被占用
- *   GPIO19 / 20    USB-JTAG（你调试和烧录用的就是这个口）
- *   GPIO43 / 44    UART0，也就是你的串口控制台
- *   GPIO0 / 3 / 45 / 46   strapping 引脚，上电时的电平决定启动模式，别乱接
- *
- * 安全的选择：GPIO1、2、4-18、21、38-42、47、48。
- * 具体以你板子的原理图为准。
- *
- * 关于板载 LED：很多 ESP32-S3 开发板的板载 LED 是"可寻址 RGB"（WS2812 一类），
- * 那种 LED 用普通 GPIO 高低电平驱动不了——它需要按特定时序发送数据帧，
- * 得用 RMT 或 SPI 外设。官方示例见：
- *   IDF_PATH/examples/peripherals/rmt/led_strip
- *   IDF_PATH/examples/get-started/blink   （它同时支持普通 LED 和可寻址 LED）
- * 本模板用的是普通 GPIO 驱动方式，适合外接 LED，或板载就是普通 LED 的情况。
- * 如果你板载是可寻址 RGB，代码能正常跑、串口会正常打印，但 LED 不会亮。
+ * 外接 LED 的引脚。你的板子上板载 LED 接在 UART 线上（U0TXD/U0RXD），
+ * 那是串口收发指示灯，不适合当用户 LED 用，所以这里用外接 LED。
+ * 安全可用的 GPIO：1、2、4-18、21、38-42、47、48。
+ * 注意 GPIO33-37 被八线 PSRAM 占用，GPIO26-32 是 Flash 总线。
  */
 #define LED_GPIO 2
 
-/* 闪烁周期（毫秒） */
-#define BLINK_PERIOD_MS 1000
+/*
+ * 按键引脚。你板子上的 KEY2 就是 BOOT 按键，接 GPIO0，低电平有效。
+ *
+ * 注意 GPIO0 是 strapping 引脚：上电瞬间它的电平决定芯片是否进入下载模式。
+ * 作为运行期输入完全没问题（刚才实测空闲为高电平），但**不要在复位时按住它**，
+ * 否则芯片会停在 ROM 下载模式，程序不启动。
+ */
+#define BUTTON_GPIO 0
+#define BUTTON_ACTIVE_LEVEL 0     /* 0 = 低电平有效（按键接地） */
+#define BUTTON_DEBOUNCE_MS 30
+
+/* 闪烁周期可选项，按键循环切换 */
+static const uint32_t k_periods_ms[] = {1000, 500, 200, 100};
+#define PERIOD_COUNT (sizeof(k_periods_ms) / sizeof(k_periods_ms[0]))
+
+/* 任务 → 任务：传递新的闪烁周期 */
+static QueueHandle_t s_period_queue = NULL;
 
 /**
  * @brief 闪烁任务
  *
- * 单独开一个任务来做业务，而不是在 app_main 里 while(1)。
- * 这样 app_main 只负责"搭台"，业务跑在自己的任务里。
- * 将来功能变多时，每个功能一个任务，用优先级和延时让它们协作。
+ * 关键看这里怎么"定时"。
+ *
+ * 直觉写法是 vTaskDelay(period) 然后循环。但那样有个问题：
+ * 如果当前周期是 1000ms，按键改了周期，最坏要等 1 秒才生效。
+ *
+ * 这里用 xQueueReceive() 的超时参数充当延时：
+ *   - 队列里没数据 → 超时返回 pdFALSE，相当于睡了 period 毫秒
+ *   - 队列里有数据 → 立刻返回 pdTRUE，不用等满
+ *
+ * 于是"定时"和"响应事件"合并成了一次调用，周期改变**立即生效**。
+ * 这是 RTOS 里非常常用的手法——用一个带超时的阻塞调用，
+ * 同时实现"周期性动作"和"可被打断的等待"。
  */
 static void blink_task(void *arg)
 {
-    /* 用不到的参数显式丢弃，避免编译告警 */
     (void)arg;
 
-    ESP_LOGI(TAG, "闪烁任务启动");
+    uint32_t period_ms = k_periods_ms[0];
+    ESP_LOGI(TAG, "闪烁任务启动，初始周期 %u ms", (unsigned)period_ms);
 
     while (1) {
         ESP_ERROR_CHECK(led_toggle());
         ESP_LOGI(TAG, "LED %s", led_is_on() ? "亮" : "灭");
 
-        /*
-         * vTaskDelay() 与 HAL_Delay() 的本质区别：
-         *
-         * HAL_Delay() 是忙等——CPU 在这 1 秒里空转，什么也干不了。
-         * vTaskDelay() 是阻塞让出——本任务进入阻塞态，调度器立刻去跑
-         * 其他就绪任务，1 秒后本任务被唤醒。所以多个任务可以"同时"
-         * 各等各的，互不干扰。
-         *
-         * 用 pdMS_TO_TICKS() 把毫秒换算成系统节拍数。当前 tick 频率是 100Hz
-         * （CONFIG_FREERTOS_HZ=100），所以 1000ms = 100 个 tick。
-         */
-        vTaskDelay(pdMS_TO_TICKS(BLINK_PERIOD_MS));
+        uint32_t new_period;
+        if (xQueueReceive(s_period_queue, &new_period, pdMS_TO_TICKS(period_ms)) == pdTRUE) {
+            period_ms = new_period;
+            ESP_LOGI(TAG, "周期切换为 %u ms，立即生效", (unsigned)period_ms);
+        }
+    }
+}
 
-        /*
-         * 栈使用情况。返回的是"历史最低剩余栈空间"，单位是字（4 字节）。
-         * 这个值越接近 0 越危险——说明栈快用满了。
-         * 调任务栈大小时靠它判断，别靠猜。
-         */
-        ESP_LOGI(TAG, "任务栈历史最低剩余: %u 字（约 %u 字节）",
-                 (unsigned)uxTaskGetStackHighWaterMark(NULL),
-                 (unsigned)uxTaskGetStackHighWaterMark(NULL) * (unsigned)sizeof(StackType_t));
+/**
+ * @brief 按键处理任务
+ *
+ * 它只做一件事：等按键事件，按下就切换周期。
+ * 真正的按键识别（读电平、去抖）已经在 ISR 里完成了，
+ * 这里拿到的都是"已经确认过的事件"。
+ */
+static void button_task(void *arg)
+{
+    (void)arg;
+
+    QueueHandle_t evq = button_get_event_queue();
+    if (evq == NULL) {
+        ESP_LOGE(TAG, "按键事件队列为空，任务退出");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "按键任务启动，按下 BOOT 键切换闪烁周期");
+
+    int idx = 0;
+    while (1) {
+        button_event_t ev;
+        /* portMAX_DELAY = 无限等待。本任务平时完全休眠，不占 CPU，
+         * 只有按键事件到来时才会被唤醒。这是事件驱动任务的标准写法。 */
+        if (xQueueReceive(evq, &ev, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+
+        /* 只处理按下，松开事件忽略 */
+        if (ev != BUTTON_EVENT_PRESSED) {
+            continue;
+        }
+
+        idx = (idx + 1) % PERIOD_COUNT;
+        uint32_t p = k_periods_ms[idx];
+        ESP_LOGI(TAG, "按键按下 → 请求切换到 %u ms", (unsigned)p);
+
+        /* 发给闪烁任务。超时传 0：队列满就丢弃，绝不在这里阻塞 */
+        xQueueSend(s_period_queue, &p, 0);
     }
 }
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "app_main 开始，当前运行在 main 任务中");
+    ESP_LOGI(TAG, "app_main 开始");
 
-    /* ESP_ERROR_CHECK：出错就打印错误码并复位，而不是带着坏状态继续跑。
-     * 开发阶段建议所有可能失败的初始化都套上它，能省掉大量排查时间。 */
     ESP_ERROR_CHECK(led_init(LED_GPIO));
 
-    /*
-     * 创建闪烁任务。
-     *
-     * 这里有个容易踩的坑：栈深度参数的单位是【字节】，不是"字"。
-     * 标准 FreeRTOS 里这个参数是字数，ESP-IDF 改成了字节
-     * （头文件注释原文：Note that this differs from vanilla FreeRTOS）。
-     * 所以下面 2048 表示约 2KB 栈，而不是 8KB。
-     */
-    BaseType_t ret = xTaskCreate(blink_task,   /* 任务函数 */
-                                 "blink",      /* 任务名，调试时能在任务列表里看到 */
-                                 2048,         /* 栈大小，单位字节（约 2KB） */
-                                 NULL,         /* 传给任务的参数，本例不需要 */
-                                 5,            /* 优先级，数字越大越高，空闲任务是 0 */
-                                 NULL);        /* 任务句柄，不需要就传 NULL */
-
-    /* xTaskCreate 返回 pdPASS 表示创建成功。创建失败通常是内存不够。 */
-    if (ret != pdPASS) {
-        ESP_LOGE(TAG, "创建闪烁任务失败");
+    s_period_queue = xQueueCreate(4, sizeof(uint32_t));
+    if (s_period_queue == NULL) {
+        ESP_LOGE(TAG, "创建周期队列失败");
         return;
     }
 
+    const button_config_t btn_cfg = {
+        .gpio_num = BUTTON_GPIO,
+        .active_level = BUTTON_ACTIVE_LEVEL,
+        .debounce_ms = BUTTON_DEBOUNCE_MS,
+    };
+    ESP_ERROR_CHECK(button_init(&btn_cfg));
+
     /*
-     * app_main 在这里返回。
-     *
-     * 返回不等于程序结束。main 任务会自行删除，
-     * 而 blink_task 会继续跑下去。
-     * 这和 HAL 里 main() 返回即"程序结束"完全不同——
-     * 在 ESP-IDF 里，只要还有任务在跑，系统就活着。
+     * 创建两个任务。优先级给相同的 5——它们互不抢占，
+     * 靠队列阻塞自然协作。如果按键要求响应更快，可以把 button_task 提到 6。
      */
-    ESP_LOGI(TAG, "app_main 返回，main 任务即将结束，blink_task 继续运行");
+    xTaskCreate(blink_task,  "blink",  2048, NULL, 5, NULL);
+    xTaskCreate(button_task, "button", 3072, NULL, 5, NULL);
+
+    /* app_main 返回，main 任务结束，上面两个任务继续运行 */
+    ESP_LOGI(TAG, "app_main 返回，blink_task 与 button_task 继续运行");
 }
