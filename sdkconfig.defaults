@@ -60,3 +60,39 @@ CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT=y
 # 量产时改为 CONFIG_COMPILER_OPTIMIZATION_SIZE=y 或 _PERFORMANCE=y
 CONFIG_COMPILER_OPTIMIZATION_DEBUG=y
 CONFIG_COMPILER_OPTIMIZATION_DEFAULT=y
+
+# ---------- 板级配置（本工程的硬件接线） ----------
+# 这些选项定义在 main/Kconfig.projbuild 里，不写在这里也能编过（Kconfig 有
+# default）。写下来是为了让"新克隆的仓库"开箱就是这块板的接线，
+# 不用先跑一遍 menuconfig。
+#
+# 在 menuconfig 里改过的值只会写进 sdkconfig（本机，不入库），
+# 所以换板子时记得同步回这一节。
+CONFIG_BOARD_LED_GPIO=2
+CONFIG_BOARD_LED_ACTIVE_LEVEL=1
+CONFIG_BOARD_BUTTON_GPIO=0
+CONFIG_BOARD_BUTTON_ACTIVE_LEVEL=0
+CONFIG_BOARD_BUTTON_DEBOUNCE_MS=30
+CONFIG_BOARD_RGB_GPIO=48
+CONFIG_BOARD_RGB_LED_COUNT=1
+
+# DHT11 单总线数据引脚（本板接 GPIO6）。
+# 必须外接 5.1kΩ 上拉到 3.3V，传感器用 3.3V 供电，
+# 3.3V 时数据线不超过 100cm——理由见 Kconfig 的 help。
+CONFIG_BOARD_DHT11_GPIO=6
+
+# 采样周期。DHT11 手册要求大于 2 秒；读太快会静默返回旧值而不是报错。
+CONFIG_BOARD_SAMPLE_INTERVAL_MS=2000
+
+# ---------- WiFi 凭据 ----------
+# **故意留空**。
+#
+# 凭据只写进本机 sdkconfig（已被 .gitignore 排除），
+# 千万不要把真实密码同步到本文件——本文件是入库的，
+# 同步过来就等于把密码提交进了 git。
+#
+# 填法：idf.py menuconfig → "WiFi 连接（凭据只存本机，不入库）"
+# 留空的效果：编译时给一句 #warning，运行时不联网，
+# 但 LED / 按键 / RGB / 温湿度采集全部照常。
+CONFIG_WIFI_SSID=""
+CONFIG_WIFI_PASSWORD=""

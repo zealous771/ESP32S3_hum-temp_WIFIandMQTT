@@ -19,9 +19,11 @@
 #include "esp_log.h"
 
 #include "button.h"
+#include "dht11.h"
 #include "led.h"
 #include "rgb_led.h"
 #include "settings.h"
+#include "wifi_mgr.h"
 
 static const char *TAG = "app";
 
@@ -48,6 +50,26 @@ static app_ctx_t s_ctx;
 #define RGB_TASK_NAME      "rgb"
 #define RGB_TASK_STACK     2560
 #define RGB_TASK_PRIO      5
+
+/*
+ * 遥测任务。栈给得比 rgb 大：它每轮都要 snprintf 格式化 JSON
+ * 再走一次 ESP_LOGI（内部是 vprintf），栈开销是五个任务里最高的。
+ * 实际用量由 app_report_stack() 定期上报，靠数据而不是猜来调。
+ */
+#define TELEMETRY_TASK_NAME  "telemetry"
+#define TELEMETRY_TASK_STACK 3584
+#define TELEMETRY_TASK_PRIO  5
+
+/*
+ * 采样周期的兜底下限。
+ *
+ * 为什么要防这一手：如果这里传进来 0，vTaskDelay(0) 不阻塞，
+ * 任务会变成紧循环——一边狂刷 DHT11 总线，一边以最高速度打日志，
+ * 既会把串口冲垮，也会饿死同优先级的其它任务。
+ *
+ * 2000 不是随手取的数：DHT11 手册要求两次读取间隔大于 2 秒。
+ */
+#define SAMPLE_INTERVAL_MIN_MS 2000
 
 static esp_err_t init_peripherals(const app_config_t *config)
 {
@@ -77,19 +99,82 @@ static esp_err_t init_peripherals(const app_config_t *config)
         ESP_LOGE(TAG, "RGB 初始化失败: %s", esp_err_to_name(ret));
         return ret;
     }
+
+    const dht11_config_t dht_cfg = {
+        .gpio_num        = config->dht11_gpio,
+        .min_interval_ms = config->sample_interval_ms,
+    };
+    ret = dht11_init(&dht_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "DHT11 初始化失败: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    /*
+     * WiFi 放最后初始化：前面几步是"本机必须能用的功能"，
+     * WiFi 是"锦上添花"。真出问题时先保证前面的已经就绪。
+     *
+     * 两个特殊处理：
+     *
+     *   ESP_ERR_INVALID_ARG —— 表示 SSID 没填。这是受支持的"不联网"用法，
+     *     不是故障，所以降级继续跑，不往上返回错误。判断依据是空 SSID
+     *     在 wifi_mgr 里被明确归到 INVALID_ARG；真正的初始化失败
+     *     （内存不足、底层驱动报错）会走到下面的错误分支。
+     *
+     *   wifi_mgr_init() 不阻塞：它只注册事件、启动驱动就返回。
+     *     要不要等 IP 由调用方决定。这里选择**等一下**，理由见下面
+     *     调用处的注释。
+     */
+    const wifi_mgr_config_t wifi_cfg = {
+        .ssid               = config->wifi_ssid,
+        .password           = config->wifi_password,
+        .connect_timeout_ms = config->wifi_connect_timeout_ms,
+    };
+    ret = wifi_mgr_init(&wifi_cfg);
+    if (ret == ESP_ERR_INVALID_ARG) {
+        ESP_LOGW(TAG, "未配置 WiFi 名称，本次不联网（其它功能照常）");
+    } else if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "WiFi 初始化失败: %s", esp_err_to_name(ret));
+        return ret;
+    } else {
+        /*
+         * 等 IP，但**超时不当失败**。
+         *
+         * 为什么在这里等而不是让 telemetry_task 自己管？
+         *   等完再建任务，遥测的第一行报文就能带上正确的 wifi 标志；
+         *   否则前几秒会打出 "wifi":false，容易被误读成"连不上"。
+         *
+         * 为什么超时不返回错误？
+         *   路由器不在、密码还没填对，这些都是**可能随时恢复**的情况：
+         *   wifi_mgr 内部有重连逻辑，连上后标志位会自己变成 true。
+         *   为此让 app_start() 失败（进而 ESP_ERROR_CHECK 复位）就太粗暴了——
+         *   设备明明还能做本地采集。所以只记一行告警。
+         *
+         * 最坏代价：路由器不可达时启动多花 wifi_connect_timeout_ms。
+         * 这是有界的，且换来了确定性的启动日志顺序。
+         */
+        ret = wifi_mgr_wait_connected(config->wifi_connect_timeout_ms);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "等待 WiFi 连接超时（%s），继续启动；连上后会自动恢复",
+                     esp_err_to_name(ret));
+        }
+    }
     return ESP_OK;
 }
 
 static esp_err_t create_tasks(void)
 {
     /*
-     * 三个任务的优先级都给 5——它们互不抢占，靠各自的阻塞调用自然协作：
-     * blink 和 button 阻塞在队列上，rgb 阻塞在延时上。
+     * 四个任务的优先级都给 5——它们互不抢占，靠各自的阻塞调用自然协作：
+     * blink 和 button 阻塞在队列上，rgb 阻塞在延时上，
+     * telemetry 阻塞在采样周期的延时上。
+     *
      * 如果按键要求响应更快，可以把 button_task 提到 6。
      *
      * pvParameters 传 &s_ctx：任务通过它拿到周期表和队列，
      * 不需要访问任何全局变量。rgb_task 用不到上下文，
      * 但保持一致的传参方式，以后它要加参数时不用改调用处。
+     * （telemetry_task 用得到——它要从上下文里取采样周期。）
      */
     if (xTaskCreate(app_blink_task, BLINK_TASK_NAME, BLINK_TASK_STACK,
                     &s_ctx, BLINK_TASK_PRIO, NULL) != pdPASS) {
@@ -106,6 +191,12 @@ static esp_err_t create_tasks(void)
     if (xTaskCreate(app_rgb_task, RGB_TASK_NAME, RGB_TASK_STACK,
                     &s_ctx, RGB_TASK_PRIO, NULL) != pdPASS) {
         ESP_LOGE(TAG, "创建 RGB 任务失败");
+        return ESP_ERR_NO_MEM;
+    }
+
+    if (xTaskCreate(app_telemetry_task, TELEMETRY_TASK_NAME, TELEMETRY_TASK_STACK,
+                    &s_ctx, TELEMETRY_TASK_PRIO, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "创建遥测任务失败");
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
@@ -138,6 +229,22 @@ esp_err_t app_start(const app_config_t *config)
 
     s_ctx.periods_ms   = config->periods_ms;
     s_ctx.period_count = config->period_count;
+
+    /*
+     * 采样周期兜底。
+     *
+     * Kconfig 里已经用 range 2000 60000 拦住了非法值，但 app 组件是
+     * "可以被复制到别的工程"的，不能假设调用方一定走了那份 Kconfig。
+     * 传 0 的后果不是"读得快一点"，而是任务变成紧循环把总线刷爆，
+     * 所以在组件边界上再挡一道——这类校验放在组件里比放在入口里可靠。
+     */
+    s_ctx.sample_interval_ms = config->sample_interval_ms;
+    if (s_ctx.sample_interval_ms < SAMPLE_INTERVAL_MIN_MS) {
+        ESP_LOGW(TAG, "采样周期 %u ms 过短，改用 %u ms（DHT11 要求 > 2 秒）",
+                 (unsigned)s_ctx.sample_interval_ms,
+                 (unsigned)SAMPLE_INTERVAL_MIN_MS);
+        s_ctx.sample_interval_ms = SAMPLE_INTERVAL_MIN_MS;
+    }
 
     /*
      * 先从 NVS 读回上次保存的周期，在周期表里反查出下标。

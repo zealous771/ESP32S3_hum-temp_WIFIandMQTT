@@ -25,7 +25,7 @@
  *   sdkconfig.h，也没有 -DCONFIG_xxx。所以下面必须显式 include。
  *   （生成位置是 build/config/sdkconfig.h，该目录已在头文件搜索路径里。）
  *
- * 数据流（跨四个组件）：
+ * 数据流（跨五个组件）：
  *
  *   按键 GPIO ──中断──▶ button 组件 ISR ──队列──▶ app/button_task
  *                                                      │
@@ -34,14 +34,26 @@
  *                        led 组件 ◀── app/blink_task ◀──┘
  *
  *   RGB GPIO ◀── RMT 外设 ◀── rgb_led 组件 ◀── app/rgb_task（独立循环色相）
+ *
+ *   DHT11 数据线 ◀── 单总线时序 ◀── dht11 组件 ◀── app/telemetry_task
+ *                                                      │
+ *                                              JSON 报文（串口打印）
+ *                                                      ▼
+ *                        下一轮接 MQTT 时，这份报文直接 publish 出去
+ *
+ *   WiFi ◀── wifi_mgr 组件（Station 模式）──▶ telemetry_task 查连接状态
  */
 #include <stdint.h>
 
 #include "sdkconfig.h"
 
 #include "esp_err.h"
+#include "esp_log.h"
 
 #include "app.h"
+
+/* 日志标签。约定用文件名，方便在串口输出里过滤。 */
+static const char *TAG = "main";
 
 /*
  * 闪烁周期可选项，按键按下时循环切换。
@@ -51,13 +63,47 @@
  */
 static const uint32_t k_periods_ms[] = {1000, 500, 200, 100};
 
+/*
+ * 等待拿到 IP 的超时。
+ *
+ * 这个不是"板级信息"（跟引脚无关），所以留在代码里而不是 Kconfig。
+ * 15 秒足够覆盖路由器 DHCP 较慢的情况；超时也不影响设备其它功能，
+ * 只是串口里不会出现 IP 那一行。
+ */
+#define WIFI_CONNECT_TIMEOUT_MS 15000
+
+/*
+ * SSID 没填时提醒一句。
+ *
+ * 为什么是**运行期**判断而不是 #if 编译期判断？
+ *   CONFIG_WIFI_SSID 是 Kconfig 的 string 类型，展开后是字符串字面量
+ *   （"" 或 "MyAP" 这样）。而 C 的预处理器**不认识字符串字面量**：
+ *   写 `#if CONFIG_WIFI_SSID[0] == '\0'` 会直接报
+ *       error: token '""' is not valid in preprocessor expressions
+ *   整个编译都过不去（本工程实测撞过这个坑）。
+ *   sizeof() 虽然能进 #if，但它不能作用于 #if 里的字符串比较；
+ *   总之"字符串内容"这类判断天生属于运行期。
+ *
+ * 为什么值得提醒？因为"忘了填 SSID"的表现是——编译、烧录、运行全部正常，
+ * 只是永远连不上，串口里一个错都不报。这种静默失败最费排查时间。
+ */
+static void warn_if_ssid_empty(void)
+{
+    if (CONFIG_WIFI_SSID[0] == '\0') {
+        ESP_LOGW(TAG, "未配置 WiFi 名称（CONFIG_WIFI_SSID 为空），本次不联网；"
+                      "填法：idf.py menuconfig → WiFi 连接");
+    }
+}
+
 void app_main(void)
 {
+    warn_if_ssid_empty();
+
     /*
      * 把配置装起来交给应用层。
      *
      * 注意这里 app 组件**完全不知道**这些值是什么——引脚接在哪、
-     * 去抖多久，都是"这台机器特有的信息"，由调用方注入。
+     * 去抖多久、连哪个 AP，都是"这台机器特有的信息"，由调用方注入。
      * 所以 components/app/ 整个目录可以原样复制到别的工程。
      */
     const app_config_t cfg = {
@@ -68,6 +114,14 @@ void app_main(void)
         .button_debounce_ms  = CONFIG_BOARD_BUTTON_DEBOUNCE_MS,
         .rgb_gpio            = CONFIG_BOARD_RGB_GPIO,
         .rgb_led_count       = CONFIG_BOARD_RGB_LED_COUNT,
+
+        .dht11_gpio          = CONFIG_BOARD_DHT11_GPIO,
+        .sample_interval_ms  = CONFIG_BOARD_SAMPLE_INTERVAL_MS,
+
+        .wifi_ssid               = CONFIG_WIFI_SSID,
+        .wifi_password           = CONFIG_WIFI_PASSWORD,
+        .wifi_connect_timeout_ms = WIFI_CONNECT_TIMEOUT_MS,
+
         .periods_ms          = k_periods_ms,
         .period_count        = sizeof(k_periods_ms) / sizeof(k_periods_ms[0]),
     };

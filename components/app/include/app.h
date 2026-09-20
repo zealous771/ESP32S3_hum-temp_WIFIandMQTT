@@ -48,6 +48,24 @@ typedef struct {
     int rgb_gpio;                 /*!< 可寻址 RGB（WS2812B）数据线 GPIO */
     uint32_t rgb_led_count;       /*!< 可寻址 RGB 的灯珠数量，板载那颗是 1 */
 
+    int dht11_gpio;               /*!< DHT11 温湿度传感器的单总线数据引脚 */
+    uint32_t sample_interval_ms;  /*!< 温湿度采样周期；DHT11 手册要求 > 2000 */
+
+    /*
+     * WiFi 凭据。
+     *
+     * 为什么是 const char * 而不是定长数组？
+     *   数组会把"最长 32/64 字节"这个空间代价带进结构体，而组件只是
+     *   看一眼就把它拷进 WiFi 驱动的定长配置里，没有必要在这里再存一份。
+     *   字符串字面量的生命周期是全程的，所以指针足够。
+     *
+     * ssid 传空串表示"不联网"——这是受支持的用法，不是错误路径。
+     * 设备会照常跑 LED / 按键 / RGB / 温湿度采集，只是不上报。
+     */
+    const char *wifi_ssid;        /*!< WiFi 名称；空串表示不联网 */
+    const char *wifi_password;    /*!< WiFi 密码；开放网络传空串 */
+    uint32_t wifi_connect_timeout_ms; /*!< 等待拿到 IP 的超时，毫秒 */
+
     const uint32_t *periods_ms;   /*!< 闪烁周期表，按键按下时循环切换 */
     size_t period_count;          /*!< 周期表长度，必须 >= 1 */
 } app_config_t;
@@ -60,7 +78,7 @@ typedef struct {
  * @warning **失败时不做回滚**。本函数按"外设 → 队列 → 任务"的顺序推进，
  *          任何一步失败就立即返回错误，但**前面已经成功的步骤不会撤销**：
  *          比如外设初始化成功后队列创建失败，外设仍处于已初始化状态；
- *          又比如三个任务里第二个创建失败，第一个任务已经在跑了。
+ *          又比如几个任务里第二个创建失败，第一个任务已经在跑了。
  *
  *          所以调用方**不应该**在失败后继续使用这个系统，也不该重试——
  *          重试会因为"已经初始化过了"而返回 ESP_ERR_INVALID_STATE。
@@ -77,7 +95,21 @@ typedef struct {
  *      - ESP_OK               成功
  *      - ESP_ERR_INVALID_ARG  配置为 NULL、周期表为空
  *      - ESP_ERR_NO_MEM       队列或任务创建失败
- *      - 其他                 外设初始化失败时，透传 led_init / button_init 的错误码
+ *      - 其他                 外设初始化失败时，透传各组件 init 的错误码
+ *                             （led_init / button_init / rgb_led_init /
+ *                              dht11_init）
+ *
+ * @note WiFi 有两条特殊约定：
+ *
+ *       1. **ssid 为空表示不联网，是受支持的用法**。此时本函数不会失败，
+ *          只是 telemetry_task 的报文里 "wifi" 恒为 false。
+ *          只有 WiFi 真正初始化失败（比如内存不足）才返回错误。
+ *
+ *       2. **等 IP 超时不算失败**。本函数会阻塞最多
+ *          wifi_connect_timeout_ms 等一次 IP，好让第一行遥测报文就带上
+ *          正确的 wifi 标志；超时只记一行告警就继续建任务。
+ *          路由器后来自动连上时，wifi_mgr 的重连逻辑会把状态纠正过来。
+ *          所以"启动耗时"的上界包含这个超时值。
  */
 esp_err_t app_start(const app_config_t *config);
 

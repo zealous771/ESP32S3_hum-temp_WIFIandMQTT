@@ -56,6 +56,15 @@ typedef struct {
      *   ctx->period_queue           —— button_task → blink_task（传新周期）
      */
     QueueHandle_t period_queue;
+
+    /*
+     * 温湿度采样周期，毫秒。
+     *
+     * telemetry_task 用它当循环延时。注意 dht11 驱动内部还有一道
+     * min_interval_ms 校验兜底——两边都设成同一个值是有意的：
+     * 任务这边负责"节奏"，驱动那边负责"防呆"。
+     */
+    uint32_t sample_interval_ms;
 } app_ctx_t;
 
 /*
@@ -67,6 +76,7 @@ typedef struct {
 void app_blink_task(void *arg);
 void app_button_task(void *arg);
 void app_rgb_task(void *arg);
+void app_telemetry_task(void *arg);
 
 /**
  * @brief 记录**当前任务**的栈使用水位
