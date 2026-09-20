@@ -52,3 +52,4 @@ typedef struct {
  */
 void app_blink_task(void *arg);
 void app_button_task(void *arg);
+void app_rgb_task(void *arg);

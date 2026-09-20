@@ -14,13 +14,15 @@
  * 如果把任务都堆在这里，每加一个功能入口文件就长一截，很快读不动了。
  * 拆开之后，加新任务只改 app 组件，这个文件保持不变。
  *
- * 数据流（跨三个组件）：
+ * 数据流（跨四个组件）：
  *
  *   按键 GPIO ──中断──▶ button 组件 ISR ──队列──▶ app/button_task
  *                                                      │
  *                                                  队列（新周期）
  *                                                      ▼
  *                        led 组件 ◀── app/blink_task ◀──┘
+ *
+ *   RGB GPIO ◀── RMT 外设 ◀── rgb_led 组件 ◀── app/rgb_task（独立循环色相）
  */
 #include <stdint.h>
 
@@ -49,6 +51,17 @@
 #define BUTTON_ACTIVE_LEVEL 0     /* 0 = 低电平有效（按键接地） */
 #define BUTTON_DEBOUNCE_MS  30
 
+/*
+ * 板载可寻址 RGB（WS2812B）的数据线，接在 GPIO48。
+ *
+ * 注意这颗灯**不能**用普通 GPIO 的高低电平驱动——它是一根单线串行总线，
+ * 靠高电平持续的长短来编码 0 和 1，时序要求到百纳秒量级。
+ * 所以它走的是 RMT 外设，由 rgb_led 组件负责，
+ * 详见 components/rgb_led/include/rgb_led.h 里的说明。
+ */
+#define RGB_GPIO       48
+#define RGB_LED_COUNT  1
+
 /* 闪烁周期可选项，按键按下时循环切换 */
 static const uint32_t k_periods_ms[] = {1000, 500, 200, 100};
 
@@ -59,6 +72,8 @@ void app_main(void)
         .button_gpio         = BUTTON_GPIO,
         .button_active_level = BUTTON_ACTIVE_LEVEL,
         .button_debounce_ms  = BUTTON_DEBOUNCE_MS,
+        .rgb_gpio            = RGB_GPIO,
+        .rgb_led_count       = RGB_LED_COUNT,
         .periods_ms          = k_periods_ms,
         .period_count        = sizeof(k_periods_ms) / sizeof(k_periods_ms[0]),
     };

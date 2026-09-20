@@ -20,6 +20,7 @@
 
 #include "button.h"
 #include "led.h"
+#include "rgb_led.h"
 
 static const char *TAG = "app";
 
@@ -43,6 +44,10 @@ static app_ctx_t s_ctx;
 #define BUTTON_TASK_STACK  3072
 #define BUTTON_TASK_PRIO   5
 
+#define RGB_TASK_NAME      "rgb"
+#define RGB_TASK_STACK     2560
+#define RGB_TASK_PRIO      5
+
 static esp_err_t init_peripherals(const app_config_t *config)
 {
     esp_err_t ret = led_init(config->led_gpio);
@@ -61,17 +66,25 @@ static esp_err_t init_peripherals(const app_config_t *config)
         ESP_LOGE(TAG, "按键初始化失败: %s", esp_err_to_name(ret));
         return ret;
     }
+
+    ret = rgb_led_init(config->rgb_gpio, config->rgb_led_count);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "RGB 初始化失败: %s", esp_err_to_name(ret));
+        return ret;
+    }
     return ESP_OK;
 }
 
 static esp_err_t create_tasks(void)
 {
     /*
-     * 两个任务的优先级都给 5——它们互不抢占，靠队列阻塞自然协作。
+     * 三个任务的优先级都给 5——它们互不抢占，靠各自的阻塞调用自然协作：
+     * blink 和 button 阻塞在队列上，rgb 阻塞在延时上。
      * 如果按键要求响应更快，可以把 button_task 提到 6。
      *
      * pvParameters 传 &s_ctx：任务通过它拿到周期表和队列，
-     * 不需要访问任何全局变量。
+     * 不需要访问任何全局变量。rgb_task 用不到上下文，
+     * 但保持一致的传参方式，以后它要加参数时不用改调用处。
      */
     if (xTaskCreate(app_blink_task, BLINK_TASK_NAME, BLINK_TASK_STACK,
                     &s_ctx, BLINK_TASK_PRIO, NULL) != pdPASS) {
@@ -82,6 +95,12 @@ static esp_err_t create_tasks(void)
     if (xTaskCreate(app_button_task, BUTTON_TASK_NAME, BUTTON_TASK_STACK,
                     &s_ctx, BUTTON_TASK_PRIO, NULL) != pdPASS) {
         ESP_LOGE(TAG, "创建按键任务失败");
+        return ESP_ERR_NO_MEM;
+    }
+
+    if (xTaskCreate(app_rgb_task, RGB_TASK_NAME, RGB_TASK_STACK,
+                    &s_ctx, RGB_TASK_PRIO, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "创建 RGB 任务失败");
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;

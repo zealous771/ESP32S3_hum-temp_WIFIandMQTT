@@ -1,0 +1,36 @@
+# rgb_led 组件的依赖清单
+#
+# 这是 ESP-IDF 的**组件管理器**（Component Manager）用的文件。
+# 它解决的是"我需要一个不在 IDF 里、也不在我工程里的组件"这个问题。
+#
+# 对照 HAL 时代的三条路：
+#
+#   1. 手动拷源码进工程
+#      缺点：别人 clone 下来也要拷一遍；升级要手工替换；
+#            第三方代码和你的代码混在一个目录里，分不清边界。
+#
+#   2. 拿一个预编译的 .a 静态库
+#      缺点：看不到源码；工具链或 IDF 版本一变就得重新要一份。
+#
+#   3. ESP-IDF 的方式——在这里写一行版本号
+#      构建时自动从 components.espressif.com 下载到工程根目录的
+#      managed_components/ 下，版本关系记录在 dependencies.lock 里。
+#
+# 三个要点：
+#
+#   * managed_components/ 是**下载产物**，已经被 .gitignore 排除
+#     （见工程 .gitignore 第 44 行）。它和 build/ 一样属于可再生产物。
+#
+#   * dependencies.lock 则**应该入库**。它记录本次实际解析出的精确版本，
+#     保证换机器、换时间构建出来的结果一致。这和 Python 的
+#     requirements.txt 与 pip freeze 的关系类似。
+#
+#   * 首次构建需要联网。之后的构建走本地缓存，不再下载。
+#
+# 版本号的写法遵循语义化版本（semver）：
+#   "^3.0.3"  允许 3.x.y，但不允许 4.0.0
+#   "~3.0.3"  允许 3.0.y，但不允许 3.1.0
+#   "3.0.3"   精确锁定这一个版本
+# 这里用 ^，即接受 3.x 的向后兼容更新。
+dependencies:
+  espressif/led_strip: "^3.0.3"

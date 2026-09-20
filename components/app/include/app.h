@@ -38,10 +38,13 @@ extern "C" {
  * 引脚、周期都是板级信息，组件不该替调用方决定。
  */
 typedef struct {
-    int led_gpio;                 /*!< LED 所在 GPIO */
+    int led_gpio;                 /*!< 普通 LED 所在 GPIO */
     int button_gpio;              /*!< 按键所在 GPIO */
     int button_active_level;      /*!< 按下时的电平：0 低电平有效，1 高电平有效 */
     uint32_t button_debounce_ms;  /*!< 按键去抖时间，毫秒 */
+
+    int rgb_gpio;                 /*!< 可寻址 RGB（WS2812B）数据线 GPIO */
+    uint32_t rgb_led_count;       /*!< 可寻址 RGB 的灯珠数量，板载那颗是 1 */
 
     const uint32_t *periods_ms;   /*!< 闪烁周期表，按键按下时循环切换 */
     size_t period_count;          /*!< 周期表长度，必须 >= 1 */
