@@ -23,12 +23,20 @@
 
 static const char *TAG = "blink";
 
+/*
+ * 每多少轮上报一次栈水位。
+ * 这里按"轮数"而不是时间计——周期本身是可变的（按键会改），
+ * 用轮数更简单，代价是上报间隔会随周期变化。
+ */
+#define STACK_REPORT_EVERY_CYCLES 10
+
 void app_blink_task(void *arg)
 {
     /* pvParameters 传进来的是 &s_ctx，在这里取回自己的上下文 */
     const app_ctx_t *ctx = (const app_ctx_t *)arg;
 
     uint32_t period_ms = ctx->periods_ms[0];
+    uint32_t cycles = 0;
     ESP_LOGI(TAG, "闪烁任务启动，初始周期 %u ms", (unsigned)period_ms);
 
     while (1) {
@@ -39,6 +47,10 @@ void app_blink_task(void *arg)
         if (xQueueReceive(ctx->period_queue, &new_period, pdMS_TO_TICKS(period_ms)) == pdTRUE) {
             period_ms = new_period;
             ESP_LOGI(TAG, "周期切换为 %u ms，立即生效", (unsigned)period_ms);
+        }
+
+        if (++cycles % STACK_REPORT_EVERY_CYCLES == 0) {
+            app_report_stack(TAG);
         }
     }
 }

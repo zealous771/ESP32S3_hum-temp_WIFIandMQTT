@@ -53,3 +53,21 @@ typedef struct {
 void app_blink_task(void *arg);
 void app_button_task(void *arg);
 void app_rgb_task(void *arg);
+
+/**
+ * @brief 记录**当前任务**的栈使用水位
+ *
+ * 由各任务在循环里周期性调用。必须在任务自己的上下文里调——
+ * 内部用的是 uxTaskGetStackHighWaterMark(NULL)，传 NULL 表示"我自己"。
+ *
+ * 单位陷阱（重要）：
+ *   ESP-IDF 里这个函数返回的是**字节**，不是标准 FreeRTOS 文档说的"字"。
+ *   因为 Xtensa 端口的 portSTACK_TYPE 被定义成了 uint8_t：
+ *     #define portSTACK_TYPE  uint8_t      // portmacro.h:78
+ *     typedef portSTACK_TYPE StackType_t;
+ *   而 xTaskCreate 的栈参数同样是字节。两边单位一致，所以**不要**
+ *   再乘 sizeof(StackType_t) 去换算——那只会乘出错误的结果。
+ *
+ * @param tag 日志标签，一般直接传任务文件里的 TAG
+ */
+void app_report_stack(const char *tag);

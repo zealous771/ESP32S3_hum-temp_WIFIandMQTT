@@ -29,13 +29,18 @@
 
 static const char *TAG = "rgb";
 
-#define RGB_TASK_NAME   "rgb"
-#define RGB_TASK_STACK  2560
-#define RGB_TASK_PRIO   5
-
-/* 色相每步走多少度、每步之间停多久 */
+/*
+ * 色相每步走多少度、每步之间停多久。
+ *
+ * 注意：任务的**名称 / 栈大小 / 优先级不在这里**——它们统一放在 app.c。
+ * 一个任务"占多少资源"和"干什么活"分开放，调整时不用翻遍所有文件。
+ * （这三个宏曾经在本文件里重复定义过一份，但从未被使用，已删除。）
+ */
 #define HUE_STEP_DEG    3
 #define HUE_STEP_MS     60
+
+/* 每多少轮上报一次栈水位。60ms 一轮，约 5 秒报一次 */
+#define STACK_REPORT_EVERY_CYCLES 83
 
 void app_rgb_task(void *arg)
 {
@@ -43,6 +48,7 @@ void app_rgb_task(void *arg)
     (void)arg;
 
     uint32_t hue = 0;
+    uint32_t cycles = 0;
     ESP_LOGI(TAG, "RGB 任务启动，色相循环：H 每步 +%d 度，间隔 %d ms",
              HUE_STEP_DEG, HUE_STEP_MS);
 
@@ -55,6 +61,11 @@ void app_rgb_task(void *arg)
         ESP_ERROR_CHECK(rgb_led_set_hsv(0, hue, 100, 12));
 
         hue = (hue + HUE_STEP_DEG) % 360;
+
+        if (++cycles % STACK_REPORT_EVERY_CYCLES == 0) {
+            app_report_stack(TAG);
+        }
+
         vTaskDelay(pdMS_TO_TICKS(HUE_STEP_MS));
     }
 }

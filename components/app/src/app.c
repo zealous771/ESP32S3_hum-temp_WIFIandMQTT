@@ -110,6 +110,24 @@ static esp_err_t create_tasks(void)
     return ESP_OK;
 }
 
+void app_report_stack(const char *tag)
+{
+    /*
+     * uxTaskGetStackHighWaterMark(NULL) 返回**当前任务**历史最低的剩余栈空间。
+     * 传 NULL 就是"我自己"。
+     *
+     * 单位是字节——ESP-IDF 把 portSTACK_TYPE 定义成了 uint8_t，
+     * 所以这里不需要再换算。详见 app_internal.h 的说明。
+     *
+     * 怎么用这个值：
+     *   它越接近 0 越危险。留个 30% 以上的余量比较稳妥，
+     *   因为中断嵌套、日志格式化、浮点运算都可能临时吃掉更多栈。
+     *   调 xTaskCreate 的栈参数时靠它判断，别靠猜。
+     */
+    const uint32_t free_bytes = (uint32_t)uxTaskGetStackHighWaterMark(NULL);
+    ESP_LOGI(tag, "栈水位：历史最低剩余 %u 字节", (unsigned)free_bytes);
+}
+
 esp_err_t app_start(const app_config_t *config)
 {
     if (config == NULL || config->periods_ms == NULL || config->period_count == 0) {
