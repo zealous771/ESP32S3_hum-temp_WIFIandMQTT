@@ -39,6 +39,8 @@ extern "C" {
  */
 typedef struct {
     int led_gpio;                 /*!< 普通 LED 所在 GPIO */
+    int led_active_level;         /*!< LED 点亮时的电平：1 高电平点亮，0 低电平点亮 */
+
     int button_gpio;              /*!< 按键所在 GPIO */
     int button_active_level;      /*!< 按下时的电平：0 低电平有效，1 高电平有效 */
     uint32_t button_debounce_ms;  /*!< 按键去抖时间，毫秒 */

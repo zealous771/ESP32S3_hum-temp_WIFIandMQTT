@@ -27,7 +27,21 @@ static const char *TAG = "led";
 #define LED_GPIO_UNINIT (-1)
 
 static int s_gpio_num = LED_GPIO_UNINIT;
+static int s_active_level = 1;   /* 点亮时的电平，由 led_init 按配置填入 */
 static bool s_is_on = false;
+
+/*
+ * 输出"亮"或"灭"对应的电平。
+ *
+ * 因为 active_level 只可能是 0 或 1，灭的电平就是它的取反。
+ * 把换算收在这一个函数里，led_on / led_off / led_init 都不用关心
+ * 具体接法——这正是把"有效电平"抽出来的意义。
+ */
+static void set_output(bool on)
+{
+    gpio_set_level(s_gpio_num, on ? s_active_level : !s_active_level);
+    s_is_on = on;
+}
 
 /* 检查是否已初始化。所有对外接口都先过这一关，避免用未初始化的引脚。 */
 static bool is_initialized(void)
@@ -35,11 +49,19 @@ static bool is_initialized(void)
     return s_gpio_num != LED_GPIO_UNINIT;
 }
 
-esp_err_t led_init(int gpio_num)
+esp_err_t led_init(const led_config_t *config)
 {
-    if (gpio_num < 0) {
-        ESP_LOGE(TAG, "GPIO 编号非法: %d", gpio_num);
+    if (config == NULL || config->gpio_num < 0) {
+        ESP_LOGE(TAG, "配置非法");
         return ESP_ERR_INVALID_ARG;
+    }
+    if (config->active_level != 0 && config->active_level != 1) {
+        ESP_LOGE(TAG, "active_level 只能是 0 或 1，收到 %d", config->active_level);
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (is_initialized()) {
+        ESP_LOGE(TAG, "已经初始化过了");
+        return ESP_ERR_INVALID_STATE;
     }
 
     /*
@@ -49,18 +71,20 @@ esp_err_t led_init(int gpio_num)
      *
      * 注意它不会检查引脚是否被别的外设占用。如果你选的引脚
      * 正在被 USB-JTAG、Flash、PSRAM 或 UART0 使用，这里不会报错，
-     * 但行为会异常。选引脚前先确认它没被占用（见 main.c 里的说明）。
+     * 但行为会异常。选引脚前先确认它没被占用（见 main/Kconfig.projbuild 的说明）。
      */
-    gpio_reset_pin(gpio_num);
-    gpio_set_direction(gpio_num, GPIO_MODE_OUTPUT);
+    gpio_reset_pin(config->gpio_num);
+    gpio_set_direction(config->gpio_num, GPIO_MODE_OUTPUT);
 
-    s_gpio_num = gpio_num;
-    s_is_on = false;
+    s_gpio_num = config->gpio_num;
+    s_active_level = config->active_level;
 
     /* 初始化后默认熄灭，避免上电就亮着 */
-    led_off();
+    set_output(false);
 
-    ESP_LOGI(TAG, "LED 初始化完成，使用 GPIO%d", gpio_num);
+    ESP_LOGI(TAG, "LED 初始化完成：GPIO%d，%s",
+             config->gpio_num,
+             config->active_level == 1 ? "高电平点亮（拉电流）" : "低电平点亮（灌电流）");
     return ESP_OK;
 }
 
@@ -71,8 +95,7 @@ esp_err_t led_on(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    gpio_set_level(s_gpio_num, 1);
-    s_is_on = true;
+    set_output(true);
     return ESP_OK;
 }
 
@@ -83,8 +106,7 @@ esp_err_t led_off(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    gpio_set_level(s_gpio_num, 0);
-    s_is_on = false;
+    set_output(false);
     return ESP_OK;
 }
 

@@ -50,7 +50,11 @@ static app_ctx_t s_ctx;
 
 static esp_err_t init_peripherals(const app_config_t *config)
 {
-    esp_err_t ret = led_init(config->led_gpio);
+    const led_config_t led_cfg = {
+        .gpio_num     = config->led_gpio,
+        .active_level = config->led_active_level,
+    };
+    esp_err_t ret = led_init(&led_cfg);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "LED 初始化失败: %s", esp_err_to_name(ret));
         return ret;

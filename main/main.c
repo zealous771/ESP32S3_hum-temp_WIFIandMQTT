@@ -62,6 +62,7 @@ void app_main(void)
      */
     const app_config_t cfg = {
         .led_gpio            = CONFIG_BOARD_LED_GPIO,
+        .led_active_level    = CONFIG_BOARD_LED_ACTIVE_LEVEL,
         .button_gpio         = CONFIG_BOARD_BUTTON_GPIO,
         .button_active_level = CONFIG_BOARD_BUTTON_ACTIVE_LEVEL,
         .button_debounce_ms  = CONFIG_BOARD_BUTTON_DEBOUNCE_MS,
