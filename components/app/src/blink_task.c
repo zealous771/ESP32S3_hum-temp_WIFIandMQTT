@@ -35,9 +35,14 @@ void app_blink_task(void *arg)
     /* pvParameters 传进来的是 &s_ctx，在这里取回自己的上下文 */
     const app_ctx_t *ctx = (const app_ctx_t *)arg;
 
-    uint32_t period_ms = ctx->periods_ms[0];
+    /*
+     * 起始周期取"上次保存的那一档"，而不是永远从第 0 档开始。
+     * 这个下标由 app_start() 从 NVS 读出后放进上下文。
+     */
+    uint32_t period_ms = ctx->periods_ms[ctx->initial_period_index];
     uint32_t cycles = 0;
-    ESP_LOGI(TAG, "闪烁任务启动，初始周期 %u ms", (unsigned)period_ms);
+    ESP_LOGI(TAG, "闪烁任务启动，初始周期 %u ms（第 %u 档）",
+             (unsigned)period_ms, (unsigned)ctx->initial_period_index);
 
     while (1) {
         ESP_ERROR_CHECK(led_toggle());

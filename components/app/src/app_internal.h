@@ -34,6 +34,20 @@ typedef struct {
     size_t          period_count; /*!< 周期表长度 */
 
     /*
+     * 启动时使用的周期下标。
+     *
+     * 来自 NVS——上次按键切到哪一档，这次开机就从哪一档继续。
+     * 由 app_start() 从 settings 组件读出周期值，再在周期表里
+     * 反查出下标（查不到就用 0）。
+     *
+     * 为什么要存下标而不是周期值？
+     *   blink_task 和 button_task 都需要知道"当前在第几档"——
+     *   blink 用它取周期，button 用它算下一档。
+     *   在上下文里存下标，两个任务都能直接用，不用各自换算。
+     */
+    uint32_t        initial_period_index;
+
+    /*
      * 周期切换请求队列：button_task 写入新周期，blink_task 读出。
      *
      * 注意这是"任务 → 任务"的通信，和 button 组件内部那条

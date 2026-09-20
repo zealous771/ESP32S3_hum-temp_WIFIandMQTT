@@ -21,6 +21,7 @@
 #include "button.h"
 #include "led.h"
 #include "rgb_led.h"
+#include "settings.h"
 
 static const char *TAG = "app";
 
@@ -138,7 +139,36 @@ esp_err_t app_start(const app_config_t *config)
     s_ctx.periods_ms   = config->periods_ms;
     s_ctx.period_count = config->period_count;
 
-    esp_err_t ret = init_peripherals(config);
+    /*
+     * 先从 NVS 读回上次保存的周期，在周期表里反查出下标。
+     *
+     * 为什么存的是周期值（ms）而不是下标？
+     *   周期表是代码里的常量，将来可能改动。如果存下标，改了表之后
+     *   旧的下标会指向错误的档位（甚至越界）；存周期值的话，
+     *   查不到就退回第 0 档，行为始终可预期。
+     *   这类"持久化数据与代码里的表耦合"的问题很常见，
+     *   原则是：**存语义稳定的值，不存位置**。
+     */
+    esp_err_t ret = settings_init();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    const uint32_t saved_ms = settings_get_period_ms(config->periods_ms[0]);
+    uint32_t initial_index = 0;
+    for (size_t i = 0; i < config->period_count; i++) {
+        if (config->periods_ms[i] == saved_ms) {
+            initial_index = i;
+            break;
+        }
+    }
+    if (config->periods_ms[initial_index] != saved_ms) {
+        ESP_LOGW(TAG, "保存的周期 %u ms 不在当前周期表里，改用 %u ms",
+                 (unsigned)saved_ms, (unsigned)config->periods_ms[0]);
+    }
+    s_ctx.initial_period_index = initial_index;
+
+    ret = init_peripherals(config);
     if (ret != ESP_OK) {
         return ret;
     }
