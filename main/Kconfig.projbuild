@@ -1,0 +1,110 @@
+# 板级配置
+#
+# 这个文件是**本工程自己的 Kconfig 定义**，不是 IDF 的。
+# 放在 main/ 下、命名为 Kconfig.projbuild，会被构建系统收集并合并到
+# menuconfig 的**顶层**（而不是塞在 "Component config" 里面）。
+#
+# 命名区别值得记一下：
+#   Kconfig            组件内部配置，出现在 "Component config" 下
+#   Kconfig.projbuild  工程级配置，出现在 menuconfig 顶层
+#
+# 为什么要把引脚搬到这里？
+#
+#   之前这些值以 #define 写在 main.c 里，改一个引脚要动源码、重新编译。
+#   搬进 Kconfig 之后：
+#     1. 改配置不用碰代码，menuconfig 里点几下就行
+#     2. 每个选项能写 help 文本，解释"这个值该怎么填、有什么限制"
+#     3. 取值范围受 range 约束，填错会被 Kconfig 直接拦住
+#     4. 换块板子只需要一份不同的 sdkconfig.defaults，代码零改动
+#
+#   这正是官方示例（如 get-started/blink）的做法。
+#
+# 改完怎么生效？
+#   本工程 sdkconfig 不入库，所以完整流程是：
+#     1. menuconfig 里改（或直接改 sdkconfig.defaults）
+#     2. 改动只写进 sdkconfig（本机）
+#     3. 要固化就同步回 sdkconfig.defaults
+#     4. 删掉 sdkconfig 后重新构建才生效（defaults 不覆盖已存在的 sdkconfig）
+#
+# 代码里怎么读？
+#   #include "sdkconfig.h" 之后直接用 CONFIG_XXX。
+#   注意 IDF **不会**自动包含这个头文件（编译命令里既没有 -include 也没有
+#   -DCONFIG_xxx），所以必须自己 include。sdkconfig.h 由构建系统生成在
+#   build/config/ 下，该目录已在头文件搜索路径里。
+
+menu "板级配置（本工程的硬件接线）"
+
+    config BOARD_LED_GPIO
+        int "普通 LED 的 GPIO 编号"
+        range 0 48
+        default 2
+        help
+            外接 LED 接在哪个 GPIO 上。
+
+            ESP32-S3 上**不能随便用**的引脚：
+              GPIO26-32   SPI0/1 总线，接板载 Flash
+              GPIO33-37   八线 PSRAM 数据线（N16R8 占用了这 5 个）
+              GPIO19/20   USB-JTAG（本工程用它烧录和调试）
+              GPIO43/44   UART0 控制台
+              GPIO0/3/45/46  strapping 引脚，复位瞬间的电平决定启动模式
+
+            相对安全的选择：1、2、4-18、21、38-42、47、48。以原理图为准。
+
+    config BOARD_BUTTON_GPIO
+        int "按键的 GPIO 编号"
+        range 0 48
+        default 0
+        help
+            KEY2（BOOT 键）接在 GPIO0。
+
+            注意 GPIO0 是 strapping 引脚：上电瞬间它的电平决定芯片是否进入
+            下载模式。作为运行期输入没问题，但**不要在复位时按住它**，
+            否则芯片会停在 ROM 下载模式，程序不启动。
+
+    config BOARD_BUTTON_ACTIVE_LEVEL
+        int "按键按下时的电平（0 = 低电平有效，1 = 高电平有效）"
+        range 0 1
+        default 0
+        help
+            由硬件接线决定：
+              按键一端接 GPIO、另一端接地 → 按下时引脚被拉低，填 0
+              按键一端接 GPIO、另一端接电源 → 按下时引脚被拉高，填 1
+
+            本板是前者（GPIO0 有 10k 外部上拉，按下接地），所以填 0。
+
+    config BOARD_BUTTON_DEBOUNCE_MS
+        int "按键去抖时间（毫秒）"
+        range 1 500
+        default 30
+        help
+            机械按键按下瞬间触点会弹跳几十次，表现为一串极短的边沿。
+            去抖的做法是"距上次事件不足 N 毫秒的边沿直接丢弃"。
+
+            本工程把去抖放在中断服务程序里用 tick 计数做纯算术判断，
+            成本只有几十条指令，能把绝大部分抖动挡在队列之外。
+
+            一般 20~50 ms 够用。设太小会重复触发，设太大会觉得按键迟钝。
+
+    config BOARD_RGB_GPIO
+        int "可寻址 RGB 的 GPIO 编号"
+        range 0 48
+        default 48
+        help
+            板载 WS2812B 的数据线接在 GPIO48。
+
+            可寻址 RGB **不能**用普通 GPIO 的高低电平驱动——它靠单线串行
+            时序编码颜色，需要 RMT 这类能产生精确波形的外设。
+            详见 components/rgb_led/include/rgb_led.h。
+
+    config BOARD_RGB_LED_COUNT
+        int "可寻址 RGB 的灯珠数量"
+        range 1 64
+        default 1
+        help
+            板载那颗 RGB 是 1 颗。
+
+            如果外接一条灯带，这里改成实际数量（比如 8、16、60）。
+            数量影响驱动内部缓冲区大小：每颗灯 24 bit，
+            灯越多，RMT 需要的内存越多。
+
+endmenu
