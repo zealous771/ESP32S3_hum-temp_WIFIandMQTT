@@ -24,8 +24,29 @@ static const char *TAG = "rgb_led";
 static led_strip_handle_t s_strip = NULL;
 static uint32_t s_led_count = 0;
 
-/* HSV 的饱和度/明度本组件对外用 0~100，驱动用 0~255 */
-#define HSV_PERCENT_TO_255(p) ((uint8_t)(((p) > 100 ? 100 : (p)) * 255 / 100))
+/*
+ * HSV 的饱和度/明度本组件对外用 0~100，led_strip 驱动用 0~255。
+ *
+ * 这里用 static 函数而不是宏，原因是宏的**参数会被求值多次**：
+ *     #define HSV_PERCENT_TO_255(p)  ((p) > 100 ? 100 : (p)) * 255 / 100
+ *                                            ^^^^^^^      ^^^^^^^
+ * 调用 HSV_PERCENT_TO_255(i++) 时 i 会自增两次；
+ * 传带函数调用的表达式则会调两次。
+ *
+ * 本文件当前传的都是简单变量，不会出问题，但这类宏迟早会被踩到。
+ * 换成函数后参数只求值一次，编译器还能做类型检查，
+ * 而且 static 函数一样能被内联，**代价为零**。
+ *
+ * 这是 C 里的一条通用规则：能写成函数的就不要写成宏。
+ * 宏只在必须做文本替换的场合才用（如需要拼接标识符、需要跨类型）。
+ */
+static uint8_t percent_to_255(uint32_t percent)
+{
+    if (percent > 100) {
+        percent = 100;   /* 超出范围钳到上限，而不是让它溢出 */
+    }
+    return (uint8_t)(percent * 255 / 100);
+}
 
 esp_err_t rgb_led_init(int gpio_num, uint32_t led_count)
 {
@@ -129,8 +150,8 @@ esp_err_t rgb_led_set_hsv(uint32_t index, uint32_t h, uint32_t s, uint32_t v)
 
     esp_err_t ret = led_strip_set_pixel_hsv(s_strip, index,
                                            (uint16_t)(h % 360),
-                                           HSV_PERCENT_TO_255(s),
-                                           HSV_PERCENT_TO_255(v));
+                                           percent_to_255(s),
+                                           percent_to_255(v));
     if (ret != ESP_OK) {
         return ret;
     }
