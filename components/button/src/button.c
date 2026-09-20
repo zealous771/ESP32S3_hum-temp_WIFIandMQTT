@@ -151,7 +151,7 @@ esp_err_t button_init(const button_config_t *config)
     return ESP_OK;
 }
 
-QueueHandle_t button_get_event_queue(void)
+QueueHandle_t button_get_event_queue(void)//用于把句柄分享给其他组件进行任务的操作。
 {
     return s_event_queue;
 }
