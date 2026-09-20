@@ -84,14 +84,44 @@ esp_err_t button_init(const button_config_t *config)
         ESP_LOGE(TAG, "配置非法");
         return ESP_ERR_INVALID_ARG;
     }
+    if (config->active_level != 0 && config->active_level != 1) {
+        ESP_LOGE(TAG, "active_level 只能是 0 或 1，收到 %d", config->active_level);
+        return ESP_ERR_INVALID_ARG;
+    }
     if (s_gpio_num != BUTTON_GPIO_UNINIT) {
         ESP_LOGE(TAG, "已经初始化过了");
         return ESP_ERR_INVALID_STATE;
     }
 
+    /*
+     * 把毫秒换算成 tick。这里有个容易踩的坑：
+     *
+     *   pdMS_TO_TICKS 是**向下取整**的整数除法——
+     *       ticks = ms * configTICK_RATE_HZ / 1000
+     *   当前 tick 频率是 100Hz（CONFIG_FREERTOS_HZ=100），
+     *   所以 debounce_ms 小于 10 会被算成 0 个 tick。
+     *
+     * 而 s_debounce_ticks = 0 会让 ISR 里的判断
+     *       if ((now - s_last_event_tick) < s_debounce_ticks) return;
+     * 恒为假（无符号减法结果不可能小于 0），等于**去抖完全失效**，
+     * 每个机械抖动边沿都会往队列里塞事件。
+     *
+     * 这种"配置看起来设了、实际没生效"的问题最难排查，
+     * 所以在入口直接拦住，而不是让它悄悄跑下去。
+     */
+    TickType_t debounce_ticks = pdMS_TO_TICKS(config->debounce_ms);
+    if (debounce_ticks == 0) {
+        ESP_LOGE(TAG, "去抖时间 %u ms 在 %d Hz 的 tick 频率下不足 1 个 tick，"
+                      "请设为 %d ms 以上",
+                 (unsigned)config->debounce_ms,
+                 (int)configTICK_RATE_HZ,
+                 1000 / (int)configTICK_RATE_HZ);
+        return ESP_ERR_INVALID_ARG;
+    }
+
     s_gpio_num = config->gpio_num;
     s_active_level = config->active_level;
-    s_debounce_ticks = pdMS_TO_TICKS(config->debounce_ms);
+    s_debounce_ticks = debounce_ticks;
     s_last_event_tick = 0;
 
     /* 配置 GPIO 为输入。

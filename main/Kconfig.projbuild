@@ -96,7 +96,7 @@ menu "板级配置（本工程的硬件接线）"
 
     config BOARD_BUTTON_DEBOUNCE_MS
         int "按键去抖时间（毫秒）"
-        range 1 500
+        range 10 500
         default 30
         help
             机械按键按下瞬间触点会弹跳几十次，表现为一串极短的边沿。
@@ -106,6 +106,13 @@ menu "板级配置（本工程的硬件接线）"
             成本只有几十条指令，能把绝大部分抖动挡在队列之外。
 
             一般 20~50 ms 够用。设太小会重复触发，设太大会觉得按键迟钝。
+
+            **下限为什么是 10 而不是 1？**
+            因为 FreeRTOS 的 tick 频率是 100Hz（CONFIG_FREERTOS_HZ=100），
+            一个 tick 就是 10ms。而 pdMS_TO_TICKS 是向下取整的整数除法，
+            填 1~9 会被算成 0 个 tick，去抖判断就彻底失效了——
+            这种"看起来设了、实际没生效"的问题最难排查，所以直接从范围上禁掉。
+            button 组件里还有一道运行期校验兜底。
 
     config BOARD_RGB_GPIO
         int "可寻址 RGB 的 GPIO 编号"

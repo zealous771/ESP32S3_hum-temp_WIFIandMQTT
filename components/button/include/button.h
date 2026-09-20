@@ -44,7 +44,10 @@ typedef enum {
 typedef struct {
     int gpio_num;           /*!< 按键连接的 GPIO 编号 */
     int active_level;       /*!< 按下时的电平：0 = 低电平有效，1 = 高电平有效 */
-    uint32_t debounce_ms;   /*!< 去抖时间（毫秒），一般 20~50 */
+    uint32_t debounce_ms;   /*!< 去抖时间（毫秒），一般 20~50。
+                                 下限受 tick 频率限制：100Hz 下必须 >= 10，
+                                 否则换算后不足 1 个 tick，去抖会失效。
+                                 见 button_init() 的说明。 */
 } button_config_t;
 
 /**
