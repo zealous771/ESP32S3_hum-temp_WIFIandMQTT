@@ -1,0 +1,66 @@
+/*
+ * app.h —— 应用层组件的公开接口
+ *
+ * 为什么要有这一层？
+ *
+ *   main.c 是"入口"，不是"应用逻辑的存放处"。ESP-IDF 里 main 是一个特殊组件：
+ *   它总是被编译、总是第一个运行，但它的职责应该只有两件事——
+ *     1. 声明板级配置（引脚号、周期表这类"这台机器特有的信息"）
+ *     2. 把控制权交给应用层
+ *
+ *   把所有任务都堆在 main.c 里会带来两个后果：
+ *     - 每加一个任务，入口文件就长一截，很快变得难以通读
+ *     - 应用逻辑和入口耦合在一起，想搬到别的工程要整体复制
+ *
+ *   所以拆成：
+ *     main.c          板级配置 + 一行启动调用（换板子只改这里）
+ *     components/app  应用逻辑：初始化外设、建队列、创建任务
+ *
+ * 关键设计：app 组件本身不含任何"这台板子特有"的信息。
+ * 引脚接在哪、闪烁周期有几档，全部通过 app_config_t 从外部注入。
+ * 这样 app 组件可以直接复制到别的工程用。
+ */
+#pragma once
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "esp_err.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * @brief 应用配置
+ *
+ * 由调用方（main.c）填写。组件内部不假设任何默认值——
+ * 引脚、周期都是板级信息，组件不该替调用方决定。
+ */
+typedef struct {
+    int led_gpio;                 /*!< LED 所在 GPIO */
+    int button_gpio;              /*!< 按键所在 GPIO */
+    int button_active_level;      /*!< 按下时的电平：0 低电平有效，1 高电平有效 */
+    uint32_t button_debounce_ms;  /*!< 按键去抖时间，毫秒 */
+
+    const uint32_t *periods_ms;   /*!< 闪烁周期表，按键按下时循环切换 */
+    size_t period_count;          /*!< 周期表长度，必须 >= 1 */
+} app_config_t;
+
+/**
+ * @brief 启动应用：初始化外设、建立任务间通信、创建各任务
+ *
+ * 本函数返回后各任务已在运行，调用方（app_main）可以直接返回。
+ *
+ * @param config 配置。函数内只读取，调用方不必保持其生命周期
+ * @return
+ *      - ESP_OK               成功
+ *      - ESP_ERR_INVALID_ARG  配置为 NULL、周期表为空
+ *      - ESP_ERR_NO_MEM       队列或任务创建失败
+ *      - 其他                 外设初始化失败时，透传 led_init / button_init 的错误码
+ */
+esp_err_t app_start(const app_config_t *config);
+
+#ifdef __cplusplus
+}
+#endif
