@@ -8,13 +8,19 @@
  * ESP-IDF 的组件机制是一样的思路，但多了一层"依赖声明"——
  * 谁用了谁，必须在 CMakeLists 里写清楚，构建系统据此决定编译顺序和头文件可见性。
  */
-#pragma once
-
+#pragma once            //避免了头文件被重复包含
+                        /*
+                            功能等价：
+                                #ifndef MY_HEADER_H
+                                #define MY_HEADER_H
+                                ...
+                                #endif
+                        */
 #include <stdbool.h>
 
 #include "esp_err.h"
 
-#ifdef __cplusplus
+#ifdef __cplusplus      //*实现CPP和C之间的链接，当使用CPP编译器时可以链接到C，而使用C时就会被掠过。花括号内写的是C包含的C头文件*//                       
 extern "C" {
 #endif
 
