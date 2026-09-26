@@ -10,6 +10,8 @@
  *   blink_task.c    闪烁任务
  *   button_task.c   按键任务
  *   rgb_task.c      可寻址 RGB 任务
+ *   sensor_task.c   温湿度采样任务（生产者：只采集，不输出）
+ *   console_task.c  串口消费者（把采样队列里的记录打成 JSON）
  *
  * 为什么这样分：main 在 ESP-IDF 里是个特殊组件（总是被编译、总是第一个运行）。
  * 如果把任务都堆在这里，每加一个功能入口文件就长一截，很快读不动了。
@@ -25,7 +27,7 @@
  *   sdkconfig.h，也没有 -DCONFIG_xxx。所以下面必须显式 include。
  *   （生成位置是 build/config/sdkconfig.h，该目录已在头文件搜索路径里。）
  *
- * 数据流（跨五个组件）：
+ * 数据流（跨六个组件）：
  *
  *   按键 GPIO ──中断──▶ button 组件 ISR ──队列──▶ app/button_task
  *                                                      │
@@ -35,13 +37,23 @@
  *
  *   RGB GPIO ◀── RMT 外设 ◀── rgb_led 组件 ◀── app/rgb_task（独立循环色相）
  *
- *   DHT11 数据线 ◀── 单总线时序 ◀── dht11 组件 ◀── app/telemetry_task
- *                                                      │
- *                                              JSON 报文（串口打印）
- *                                                      ▼
- *                        下一轮接 MQTT 时，这份报文直接 publish 出去
+ *   ┌──────────── 采样管道（生产者 / 消费者解耦） ─────────────┐
+ *   │                                                          │
+ *   │  DHT11 数据线 ◀── 单总线时序 ◀── dht11 组件               │
+ *   │                                    │                     │
+ *   │                              app/sensor_task             │
+ *   │                              （只采样，绝不阻塞）          │
+ *   │                                    │                     │
+ *   │                          Queue<sensor_data_t>            │
+ *   │                                    │                     │
+ *   │                          app/console_task                │
+ *   │                          （格式化成 JSON，串口打印）        │
+ *   └──────────────────────────────────────────────────────────┘
+ *                         下一轮接 MQTT 时，mqtt_task 会成为
+ *                         这条队列的**第二个消费者**，
+ *                         采样侧一行都不用改。
  *
- *   WiFi ◀── wifi_mgr 组件（Station 模式）──▶ telemetry_task 查连接状态
+ *   WiFi ◀── wifi_mgr 组件（Station 模式）──▶ console_task 查连接状态
  */
 #include <stdint.h>
 
@@ -117,6 +129,13 @@ void app_main(void)
 
         .dht11_gpio          = CONFIG_BOARD_DHT11_GPIO,
         .sample_interval_ms  = CONFIG_BOARD_SAMPLE_INTERVAL_MS,
+
+        /*
+         * 设备标识。和引脚一样属于"这台机器是谁"，所以也走 Kconfig，
+         * 而不是在组件里写死或用 MAC 拼一个——那样等于替调用方做了
+         * 一个它不该做的命名决定。
+         */
+        .device_id           = CONFIG_DEVICE_ID,
 
         .wifi_ssid               = CONFIG_WIFI_SSID,
         .wifi_password           = CONFIG_WIFI_PASSWORD,

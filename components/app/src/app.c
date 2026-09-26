@@ -52,13 +52,44 @@ static app_ctx_t s_ctx;
 #define RGB_TASK_PRIO      5
 
 /*
- * 遥测任务。栈给得比 rgb 大：它每轮都要 snprintf 格式化 JSON
- * 再走一次 ESP_LOGI（内部是 vprintf），栈开销是五个任务里最高的。
- * 实际用量由 app_report_stack() 定期上报，靠数据而不是猜来调。
+ * 遥测管道拆成两个任务：生产者（采样）和消费者（输出）。
+ *
+ * 栈大小不再对称，这是拆分带来的直接收益——
+ * 拆分前一个任务要同时承担"读传感器"和"格式化 JSON + 打日志"，
+ * 只能按最费栈的那一半来给。现在两边各按自己的实际需要给：
+ *
+ *   sensor  读单总线 + 填结构体 + 拷进队列，不碰格式化，可以给得小
+ *   console 每轮走一遍 snprintf + ESP_LOGI，格式化是**整个 app 里
+ *           最吃栈的操作**（snprintf 内部上百字节转换缓冲，
+ *           日志后端还会再格式化一次，中断也可能在此期间嵌套），
+ *           所以它要得最多
+ *
+ * 具体数值不靠猜——两个任务都周期性调用 app_report_stack() 上报水位，
+ * 按实测值再调。经验判据是余量留 30% 以上。
  */
-#define TELEMETRY_TASK_NAME  "telemetry"
-#define TELEMETRY_TASK_STACK 3584
-#define TELEMETRY_TASK_PRIO  5
+#define SENSOR_TASK_NAME   "sensor"
+#define SENSOR_TASK_STACK  2560
+#define SENSOR_TASK_PRIO   5
+
+#define CONSOLE_TASK_NAME  "console"
+#define CONSOLE_TASK_STACK 3584
+#define CONSOLE_TASK_PRIO  5
+
+/*
+ * 采样队列深度。
+ *
+ * 深度决定"消费者能落后多久"。消费者按 2 秒一条的速度消费，
+ * 深度 8 意味着消费者可以卡住约 16 秒而不丢数据——足够覆盖
+ * 一次短暂的网络抖动或日志阻塞。
+ *
+ * 为什么不做得很深（比如 100）：队列元素是**按值拷贝**的，
+ * 深度直接乘上 sizeof(sensor_data_t)（约 56 字节）就是常驻内存。
+ * 而队列真正的职责是"吸收抖动"，不是"长期囤数据"——
+ * 消费者要是持续跟不上，囤多少都不够，这时正确的做法是
+ * 落盘（NVS/Flash，见文档 §37）或者干脆丢弃，而不是把 RAM 吃光。
+ * 在只有 512KB 内部 SRAM 的 S3 上，"加深队列"是个会反噬的选项。
+ */
+#define SENSOR_QUEUE_DEPTH 8
 
 /*
  * 采样周期的兜底下限。
@@ -165,16 +196,25 @@ static esp_err_t init_peripherals(const app_config_t *config)
 static esp_err_t create_tasks(void)
 {
     /*
-     * 四个任务的优先级都给 5——它们互不抢占，靠各自的阻塞调用自然协作：
+     * 五个任务的优先级都给 5——它们互不抢占，靠各自的阻塞调用自然协作：
      * blink 和 button 阻塞在队列上，rgb 阻塞在延时上，
-     * telemetry 阻塞在采样周期的延时上。
+     * sensor 阻塞在采样周期的延时上，console 阻塞在采样队列上。
      *
      * 如果按键要求响应更快，可以把 button_task 提到 6。
      *
-     * pvParameters 传 &s_ctx：任务通过它拿到周期表和队列，
+     * 特别说一下 sensor 和 console 这对生产/消费者为什么同为 5 也不会出问题：
+     *   两者都在阻塞调用上等待（vTaskDelay / xQueueReceive），
+     *   不会出现"高优先级忙等把低优先级饿死"的经典问题。
+     *   就算 sensor 被提到 6，也只是让"读传感器"更及时，
+     *   因为 console 拿不到 CPU 而丢数据的情况不会发生——
+     *   队列深度 8 已经吸收了这种抖动。
+     *   真正要警惕的是"给生产者更高优先级 + 队列满时阻塞发送"这个组合，
+     *   那会让采样任务在高优先级上把消费者彻底饿死。本工程用的是
+     *   非阻塞发送（超时 0），从设计上就绕开了这个坑。
+     *
+     * pvParameters 传 &s_ctx：任务通过它拿到周期表、队列和设备标识，
      * 不需要访问任何全局变量。rgb_task 用不到上下文，
      * 但保持一致的传参方式，以后它要加参数时不用改调用处。
-     * （telemetry_task 用得到——它要从上下文里取采样周期。）
      */
     if (xTaskCreate(app_blink_task, BLINK_TASK_NAME, BLINK_TASK_STACK,
                     &s_ctx, BLINK_TASK_PRIO, NULL) != pdPASS) {
@@ -194,9 +234,15 @@ static esp_err_t create_tasks(void)
         return ESP_ERR_NO_MEM;
     }
 
-    if (xTaskCreate(app_telemetry_task, TELEMETRY_TASK_NAME, TELEMETRY_TASK_STACK,
-                    &s_ctx, TELEMETRY_TASK_PRIO, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "创建遥测任务失败");
+    if (xTaskCreate(app_sensor_task, SENSOR_TASK_NAME, SENSOR_TASK_STACK,
+                    &s_ctx, SENSOR_TASK_PRIO, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "创建采样任务失败");
+        return ESP_ERR_NO_MEM;
+    }
+
+    if (xTaskCreate(app_console_task, CONSOLE_TASK_NAME, CONSOLE_TASK_STACK,
+                    &s_ctx, CONSOLE_TASK_PRIO, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "创建串口消费者任务失败");
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
@@ -222,13 +268,15 @@ void app_report_stack(const char *tag)
 
 esp_err_t app_start(const app_config_t *config)
 {
-    if (config == NULL || config->periods_ms == NULL || config->period_count == 0) {
+    if (config == NULL || config->periods_ms == NULL || config->period_count == 0 ||
+        config->device_id == NULL) {
         ESP_LOGE(TAG, "配置非法");
         return ESP_ERR_INVALID_ARG;
     }
 
     s_ctx.periods_ms   = config->periods_ms;
     s_ctx.period_count = config->period_count;
+    s_ctx.device_id    = config->device_id;
 
     /*
      * 采样周期兜底。
@@ -284,6 +332,21 @@ esp_err_t app_start(const app_config_t *config)
     s_ctx.period_queue = xQueueCreate(4, sizeof(uint32_t));
     if (s_ctx.period_queue == NULL) {
         ESP_LOGE(TAG, "创建周期队列失败");
+        return ESP_ERR_NO_MEM;
+    }
+
+    /*
+     * 采样队列。这是"采样与输出解耦"的物理载体——
+     * 生产者（sensor_task）和消费者（console_task / 未来的 mqtt_task）
+     * 之间唯一的连接点，两侧互相不知道对方的存在。
+     *
+     * 元素大小是 sizeof(sensor_data_t)，按值拷贝。队列一旦创建，
+     * 元素大小就固定了，所以 sensor_data_t 以后加字段（比如 rssi）
+     * 不需要改这里——sizeof 会自动跟着变。
+     */
+    s_ctx.sensor_queue = xQueueCreate(SENSOR_QUEUE_DEPTH, sizeof(sensor_data_t));
+    if (s_ctx.sensor_queue == NULL) {
+        ESP_LOGE(TAG, "创建采样队列失败");
         return ESP_ERR_NO_MEM;
     }
 

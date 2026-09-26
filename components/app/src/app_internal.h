@@ -19,6 +19,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
+#include "data_model.h"
+
 /**
  * @brief 应用的运行期上下文
  *
@@ -60,11 +62,33 @@ typedef struct {
     /*
      * 温湿度采样周期，毫秒。
      *
-     * telemetry_task 用它当循环延时。注意 dht11 驱动内部还有一道
+     * app_sensor_task 用它当循环延时。注意 dht11 驱动内部还有一道
      * min_interval_ms 校验兜底——两边都设成同一个值是有意的：
      * 任务这边负责"节奏"，驱动那边负责"防呆"。
      */
     uint32_t sample_interval_ms;
+
+    /*
+     * 设备标识，例如 "esp32s3_001"。
+     *
+     * 由 app_start() 从 app_config_t 拷进来，指向 main.c 里的字符串字面量，
+     * 生命周期是全程的，所以存指针就够。采样任务会把它填进每条
+     * sensor_data_t，最终出现在上报报文里。
+     */
+    const char *device_id;
+
+    /*
+     * 采样队列：app_sensor_task 写入，消费者任务读出。
+     *
+     * 队列元素是**按值拷贝**的 sensor_data_t（不是指针），
+     * 所以元素在队列里是自包含的，取出时不需要关心生产者的栈。
+     *
+     * 这是本工程第三条队列，三条的语义各不相同，别混：
+     *   button 组件的 s_event_queue —— ISR → button_task（按键事件）
+     *   ctx->period_queue           —— button_task → blink_task（新周期）
+     *   ctx->sensor_queue           —— sensor_task → console_task / 未来的 mqtt_task
+     */
+    QueueHandle_t sensor_queue;
 } app_ctx_t;
 
 /*
@@ -76,7 +100,18 @@ typedef struct {
 void app_blink_task(void *arg);
 void app_button_task(void *arg);
 void app_rgb_task(void *arg);
-void app_telemetry_task(void *arg);
+
+/*
+ * 采样管道被拆成"生产者 + 消费者"两端，分别对应两个任务：
+ *
+ *   app_sensor_task   读传感器 → 队列（只管采集，不碰任何输出）
+ *   app_console_task  队列 → 串口 JSON（第一个消费者，也是常驻诊断通道）
+ *
+ * 为什么不是一个任务干完？见 sensor_task.c 文件头——核心是
+ * "采样节奏不能被任何输出侧的阻塞拖垮"。
+ */
+void app_sensor_task(void *arg);
+void app_console_task(void *arg);
 
 /**
  * @brief 记录**当前任务**的栈使用水位

@@ -84,6 +84,12 @@ CONFIG_BOARD_DHT11_GPIO=6
 # 采样周期。DHT11 手册要求大于 2 秒；读太快会静默返回旧值而不是报错。
 CONFIG_BOARD_SAMPLE_INTERVAL_MS=2000
 
+# ---------- 设备标识 ----------
+# 上报报文里的 device_id，多设备时用来区分数据来源。
+# 长度上限 31 字节（sensor_data_t.device_id 是 char[32]）。
+# 同一批设备不要重名，否则后端时序数据会混在一起。
+CONFIG_DEVICE_ID="esp32s3_001"
+
 # ---------- WiFi 凭据 ----------
 # **故意留空**。
 #
@@ -92,7 +98,7 @@ CONFIG_BOARD_SAMPLE_INTERVAL_MS=2000
 # 同步过来就等于把密码提交进了 git。
 #
 # 填法：idf.py menuconfig → "WiFi 连接（凭据只存本机，不入库）"
-# 留空的效果：编译时给一句 #warning，运行时不联网，
-# 但 LED / 按键 / RGB / 温湿度采集全部照常。
+# 留空的效果：运行时不联网（main.c 会打一条 warning 说明），
+# 但 LED / 按键 / RGB / 温湿度采集与串口上报全部照常。
 CONFIG_WIFI_SSID=""
 CONFIG_WIFI_PASSWORD=""

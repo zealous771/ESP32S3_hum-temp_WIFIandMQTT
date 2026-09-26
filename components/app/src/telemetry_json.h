@@ -26,24 +26,37 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* 需要 dht11_reading_t 的完整定义（按值/按指针取字段都要用到） */
-#include "dht11.h"
+/*
+ * 入参类型是 sensor_data_t，不是 dht11_reading_t。
+ *
+ * 这个改动本身就是分层在起作用：本模块只负责"把系统内部的记录
+ * 变成字节"，它不应该知道数据是从哪颗传感器来的。改完之后，
+ * 换传感器（dht11 → sht30）不会碰到这个文件一个字，
+ * 换传输协议（串口 → MQTT）也不会。
+ */
+#include "data_model.h"
 
 /**
- * @brief 把一次温湿度读数格式化成一行 JSON
+ * @brief 把一条采样记录格式化成一行 JSON
  *
- * 为什么现在就做成独立函数？
+ * 为什么是独立函数而不是写在任务里？
  *   下一轮要接 MQTT，届时这份报文要直接 publish 出去。
- *   现在把"报文长什么样"集中在一处，接 MQTT 时不用改数据来源。
+ *   把"报文长什么样"集中在一处，接 MQTT 时只是多一个调用方，
+ *   格式改一处、处处生效。
  *
- * 输出是紧凑格式（没有多余空格），例如：
- *   {"temperature":26,"humidity":58,"wifi":true}
+ * 输出是紧凑格式（没有多余空格），字段命名对齐文档 §14：
+ *   {"device_id":"esp32s3_001","ts":123456,"seq":1,
+ *    "temperature_c":26,"humidity_rh":58,"wifi":true}
  * 越短越省流量，也越好在串口一行里看全。
+ *
+ * 与文档 §14 的差异只有一处：**暂时没有 rssi 字段**。
+ * rssi 需要 wifi_mgr 先暴露一个 RSSI 查询接口，留到接 MQTT
+ * 那一步和它一起加，避免本阶段引入额外的网络相关依赖。
  *
  * @param buf      输出缓冲
  * @param len      缓冲长度
- * @param reading  读数
- * @param wifi_ok  当前是否已联网
+ * @param d        采样记录
+ * @param wifi_ok  当前是否已联网（由调用方查，格式化函数不碰网络）
  * @return 写入的字符数（不含结尾 '\0'）；缓冲不够时返回 -1
  */
-int app_format_reading_json(char *buf, size_t len, const dht11_reading_t *reading, bool wifi_ok);
+int app_format_reading_json(char *buf, size_t len, const sensor_data_t *d, bool wifi_ok);

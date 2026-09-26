@@ -58,7 +58,7 @@ void app_rgb_task(void *arg)
          * 全亮度的 RGB 直看很刺眼，而且板载灯珠离眼睛近。
          * 明度是百分比，组件内部会换算成驱动要的 0~255。
          */
-        ESP_ERROR_CHECK(rgb_led_set_hsv(0, hue, 100, 12));
+        ESP_ERROR_CHECK(rgb_led_set_hsv(0, hue, 100, 5));
 
         hue = (hue + HUE_STEP_DEG) % 360;
 

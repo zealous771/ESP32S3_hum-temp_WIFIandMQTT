@@ -4,9 +4,9 @@
  * 三个设计取舍，都是有意的：
  *
  * 1. 自己拼字符串，不用 cJSON。
- *    报文只有三个字段、结构固定，用 snprintf 一行就能写完。
+ *    报文只有六个字段、结构固定，用 snprintf 一行就能写完。
  *    引入 JSON 库要多占几 KB Flash，还要在堆上分配/释放对象——
- *    在内存紧张的 MCU 上，为了三个字段付这个代价不划算，
+ *    在内存紧张的 MCU 上，为了六个字段付这个代价不划算，
  *    而且多一层堆分配就多一种"分配失败"的失败模式。
  *    反过来，如果哪天报文变成嵌套的、字段数量不定的，那才值得上库。
  *
@@ -27,7 +27,7 @@
 
 static const char *TAG = "telemetry_json";
 
-int app_format_reading_json(char *buf, size_t len, const dht11_reading_t *reading, bool wifi_ok)
+int app_format_reading_json(char *buf, size_t len, const sensor_data_t *d, bool wifi_ok)
 {
     /*
      * 参数检查放最前面。
@@ -37,20 +37,29 @@ int app_format_reading_json(char *buf, size_t len, const dht11_reading_t *readin
      * （注意：组件内部一律返回错误码，不用 assert/ESP_ERROR_CHECK——
      *   断言在 release 配置下会被编译掉，剩下的越界访问才是真麻烦。）
      */
-    if (buf == NULL || reading == NULL || len == 0) {
-        ESP_LOGE(TAG, "参数非法（buf=%p, reading=%p, len=%u），报文未生成",
-                 (const void *)buf, (const void *)reading, (unsigned)len);
+    if (buf == NULL || d == NULL || len == 0) {
+        ESP_LOGE(TAG, "参数非法（buf=%p, d=%p, len=%u），报文未生成",
+                 (const void *)buf, (const void *)d, (unsigned)len);
         return -1;
     }
 
     /*
+     * device_id 直接进格式串的 %s。这里**不做** JSON 转义，
+     * 因为 device_id 是本机配置的固定标识，不含引号或反斜杠；
+     * 一旦将来它可能来自外部输入（配网页面、NVS 里的用户输入），
+     * 就必须补上转义，否则一个引号就能把整条报文的结构破坏掉。
+     *
+     * ts 用 %lld：int64_t 在 xtensa 上是 long long，%ld 会截断成 32 位。
+     *
      * wifi 字段用 %s + 三元运算符，而不是 %d 打 0/1。
      * JSON 里 true/false 是布尔字面量，打 0/1 的话接收端拿到的是数字，
      * 类型和字段语义对不上（有些严格的解析器会直接判类型错误）。
      */
     const int written = snprintf(buf, len,
-                                 "{\"temperature\":%d,\"humidity\":%d,\"wifi\":%s}",
-                                 reading->temperature, reading->humidity,
+                                 "{\"device_id\":\"%s\",\"ts\":%lld,\"seq\":%u,"
+                                 "\"temperature_c\":%d,\"humidity_rh\":%d,\"wifi\":%s}",
+                                 d->device_id, (long long)d->timestamp_ms,
+                                 (unsigned)d->seq, d->temperature, d->humidity,
                                  wifi_ok ? "true" : "false");
 
     /*

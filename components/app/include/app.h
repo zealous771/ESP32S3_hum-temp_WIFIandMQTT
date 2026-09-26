@@ -52,6 +52,22 @@ typedef struct {
     uint32_t sample_interval_ms;  /*!< 温湿度采样周期；DHT11 手册要求 > 2000 */
 
     /*
+     * 设备标识，例如 "esp32s3_001"。
+     *
+     * 为什么不在这里生成、而要调用方给？
+     *   因为它属于"这台机器是谁"——板级/部署级信息，和引脚号同类。
+     *   组件若自己用 MAC 地址拼一个，就替调用方做了一个它不该做的决定
+     *   （有人希望用位置命名、有人希望用 MAC 后六位、有人要跟资产编号对齐）。
+     *
+     * 为什么是 const char * 而不是定长数组：与下面 WiFi 凭据同理，
+     * 组件只是把它拷进 sensor_data_t 的定长缓冲，不必在这里再存一份。
+     * 字符串字面量的生命周期是全程的，指针足够。
+     *
+     * 长度上限 31 字节（sensor_data_t.device_id 是 char[32]），超长会被截断。
+     */
+    const char *device_id;        /*!< 设备标识，用于上报报文中的 device_id 字段 */
+
+    /*
      * WiFi 凭据。
      *
      * 为什么是 const char * 而不是定长数组？
@@ -93,7 +109,7 @@ typedef struct {
  * @param config 配置。函数内只读取，调用方不必保持其生命周期
  * @return
  *      - ESP_OK               成功
- *      - ESP_ERR_INVALID_ARG  配置为 NULL、周期表为空
+ *      - ESP_ERR_INVALID_ARG  配置为 NULL、周期表为空、device_id 为 NULL
  *      - ESP_ERR_NO_MEM       队列或任务创建失败
  *      - 其他                 外设初始化失败时，透传各组件 init 的错误码
  *                             （led_init / button_init / rgb_led_init /
