@@ -270,6 +270,108 @@ menu "NTP 时间同步"
 
 endmenu
 
+menu "MQTT broker（凭据只存本机，不入库）"
+
+    config MQTT_BROKER_URI
+        string "broker 地址（URI）"
+        default ""
+        help
+            形如 mqtt://192.168.31.128:1883
+
+            **留空则不启用 MQTT 上报**：设备照常采集、照常往串口打
+            完整报文，只是不发给 broker。这让"还没搭好 broker"也能
+            正常编译、烧录、运行。
+
+            **千万不要填 localhost 或 127.0.0.1**——那是 ESP32 自己，
+            不是你的电脑。要填运行 broker 那台机器在局域网里的地址。
+
+            怎么知道该填什么：
+              在跑 broker 的机器上执行 ipconfig（Windows）或 ip a（Linux），
+              找局域网网卡的 IPv4 地址。注意别填成 WSL 的虚拟网卡地址
+              （172.x 开头那种），那是 WSL 内部用的，设备访问不到——
+              要用 Windows 物理网卡的地址（本机是 192.168.31.x）。
+
+            开发阶段用明文 mqtt:// 即可（文档 §39：不要把 1883 直接
+            暴露到公网）。正式部署再升级到 mqtts:// 的 8883 + 证书。
+
+            凭据去哪了：只写进本机 sdkconfig，而 sdkconfig 已在
+            .gitignore 里。**不要**把真实地址同步进 sdkconfig.defaults。
+
+    config MQTT_USERNAME
+        string "broker 用户名"
+        default ""
+        help
+            留空表示**匿名连接**。
+
+            开发阶段 Mosquitto 的默认配置就是允许匿名的
+            （allow_anonymous true），所以本项留空即可。
+            正式部署再按文档 §39 加用户名密码 / 设备证书 / ACL。
+
+    config MQTT_PASSWORD
+        string "broker 密码"
+        default ""
+        help
+            匿名连接留空。
+
+            同 WiFi 密码：只写进本机 sdkconfig，**绝不要**同步进
+            sdkconfig.defaults（那个文件是入库的）。
+
+    config MQTT_CLIENT_ID_PREFIX
+        string "client_id 前缀"
+        default ""
+        help
+            MQTT 规范要求 client_id 在同一个 broker 上唯一。
+            两个设备用同一个 client_id 连接时，后连上的会把先连上的
+            **踢下线**——表现为两台设备轮流掉线，日志里只有一条
+            语焉不详的 DISCONNECTED，非常难查。
+
+            所以默认（本项留空）**直接用 device_id 当 client_id**，
+            它本来就该是唯一的。
+
+            填了前缀则拼成 "<前缀>_<device_id>"。什么时候需要？
+            同一台设备跑两份固件做对比测试时——数据要归到同一台设备
+            名下（device_id 相同），但连接标识不能撞。
+
+    config MQTT_KEEPALIVE_S
+        int "心跳间隔（秒）"
+        range 15 600
+        default 60
+        help
+            作用有两个：
+              1. 让 broker 知道设备还活着，否则会被判定超时踢掉
+              2. **探测假死连接**——AP 还在但上行链路断了时，
+                 TCP 不会立刻报错，要等 keepalive×1.5 才发现
+
+            所以不能太大（假死发现得慢），也不能太小（流量与日志噪音）。
+            60 秒是常见折中。低于 30 秒在 2 秒一次的上报节奏下没有额外收益。
+
+    config MQTT_RECONNECT_TIMEOUT_MS
+        int "断线重试间隔（毫秒）"
+        range 1000 60000
+        default 5000
+        help
+            与 broker 断开后多久重试一次。
+
+            太小：broker 长时间不可用时日志会刷屏
+                  （本工程对断线日志做了限速，但重试本身仍耗电）。
+            太大：网络恢复后要等更久才重连上，丢的数据更多。
+
+            5 秒是"恢复快"和"日志干净"之间的折中。
+
+    config MQTT_NET_TIMEOUT_MS
+        int "单次网络操作超时（毫秒）"
+        range 1000 60000
+        default 10000
+        help
+            建立连接、收发单次数据的超时。
+
+            设太小会在网络稍慢时误判失败、反复重连；
+            设太大会让一次卡住的连接占住协议栈任务很久。
+
+            局域网内 10 秒很宽松；将来连公网 broker 可以适当加大。
+
+endmenu
+
 menu "WiFi 连接（凭据只存本机，不入库）"
 
     config WIFI_SSID

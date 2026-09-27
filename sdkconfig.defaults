@@ -100,6 +100,34 @@ CONFIG_DEVICE_ID="esp32s3_001"
 CONFIG_NTP_SERVER="ntp.aliyun.com"
 CONFIG_NTP_SYNC_LOG_INTERVAL_S=60
 
+# ---------- MQTT 上报 ----------
+# **地址与凭据故意留空**（同 WiFi 凭据的理由：本文件是入库的）。
+#
+# 留空的效果：不启用 MQTT 上报。设备照常采集、照常往串口打完整报文，
+# 只是不发给 broker。填法：idf.py menuconfig → "MQTT broker"
+#
+# 填的时候**不要用 localhost**——那是 ESP32 自己。要填运行 broker
+# 那台机器在局域网里的地址（本机是 192.168.31.128，WSL2 里的 Docker）。
+CONFIG_MQTT_BROKER_URI=""
+CONFIG_MQTT_USERNAME=""
+CONFIG_MQTT_PASSWORD=""
+CONFIG_MQTT_CLIENT_ID_PREFIX=""
+CONFIG_MQTT_KEEPALIVE_S=60
+CONFIG_MQTT_RECONNECT_TIMEOUT_MS=5000
+CONFIG_MQTT_NET_TIMEOUT_MS=10000
+
+# ---------- esp-mqtt 组件行为 ----------
+# 未连接时**跳过 publish**，而不是把消息塞进内部 outbox。
+#
+# 为什么必须打开：esp-mqtt 的默认行为是"尽力发送"——未连接时 QoS1/2
+# 的消息会进 outbox 排队，publish 返回一个正常的 msg_id（≥0），
+# 然后 30 秒后静默过期丢弃。也就是说只看返回值分不出"发出去了"和"丢了"。
+#
+# 本工程在 mqtt_mgr_publish() 里已经先查连接状态挡住了这种情况，
+# 这里是第二道防线：万一将来有人绕过封装直接调 esp_mqtt_client_publish()，
+# 打开这个开关会让它**明确返回 -1**，而不是静默丢数据。
+CONFIG_MQTT_SKIP_PUBLISH_IF_DISCONNECTED=y
+
 # ---------- WiFi 凭据 ----------
 # **故意留空**。
 #

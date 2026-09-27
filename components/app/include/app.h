@@ -93,6 +93,24 @@ typedef struct {
      */
     const char *ntp_server;       /*!< NTP 服务器；空串表示不同步时间 */
 
+    /*
+     * ── MQTT 上报 ────────────────────────────────────────────────
+     *
+     * uri 为空串表示**不启用 MQTT 上报**——同样是受支持的用法。
+     * 此时设备照常采集、照常往串口打报文，只是不发给 broker。
+     *
+     * 与 WiFi 凭据一样，这些值来自 Kconfig，而 Kconfig 里的默认值
+     * 在 sdkconfig.defaults 中**故意留空**（那个文件是入库的）。
+     * 真实地址和密码只写进本机 sdkconfig。
+     */
+    const char *mqtt_uri;             /*!< broker URI，如 mqtt://192.168.31.128:1883；空串表示不启用 */
+    const char *mqtt_username;        /*!< 用户名；空串表示匿名连接 */
+    const char *mqtt_password;        /*!< 密码；匿名连接传空串 */
+    const char *mqtt_client_id_prefix;/*!< client_id 前缀；空串表示直接用 device_id */
+    uint32_t    mqtt_keepalive_s;     /*!< 心跳间隔，秒 */
+    uint32_t    mqtt_reconnect_timeout_ms; /*!< 断线重试间隔，毫秒 */
+    uint32_t    mqtt_net_timeout_ms;  /*!< 单次网络操作超时，毫秒 */
+
     const uint32_t *periods_ms;   /*!< 闪烁周期表，按键按下时循环切换 */
     size_t period_count;          /*!< 周期表长度，必须 >= 1 */
 } app_config_t;

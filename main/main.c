@@ -147,6 +147,21 @@ void app_main(void)
          */
         .ntp_server              = CONFIG_NTP_SERVER,
 
+        /*
+         * MQTT 上报。uri 留空表示不启用上报（受支持的用法）——
+         * 设备照常采集并往串口打报文，只是不发给 broker。
+         *
+         * 和 WiFi 凭据一样，真实地址/密码只写进本机 sdkconfig；
+         * sdkconfig.defaults 里这几项**故意留空**。
+         */
+        .mqtt_uri                 = CONFIG_MQTT_BROKER_URI,
+        .mqtt_username            = CONFIG_MQTT_USERNAME,
+        .mqtt_password            = CONFIG_MQTT_PASSWORD,
+        .mqtt_client_id_prefix    = CONFIG_MQTT_CLIENT_ID_PREFIX,
+        .mqtt_keepalive_s         = CONFIG_MQTT_KEEPALIVE_S,
+        .mqtt_reconnect_timeout_ms = CONFIG_MQTT_RECONNECT_TIMEOUT_MS,
+        .mqtt_net_timeout_ms      = CONFIG_MQTT_NET_TIMEOUT_MS,
+
         .periods_ms          = k_periods_ms,
         .period_count        = sizeof(k_periods_ms) / sizeof(k_periods_ms[0]),
     };

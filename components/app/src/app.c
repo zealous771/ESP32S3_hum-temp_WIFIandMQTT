@@ -13,6 +13,8 @@
 #include "app.h"
 #include "app_internal.h"
 
+#include <stdio.h>
+
 #include "freertos/task.h"
 
 #include "esp_err.h"
@@ -21,6 +23,7 @@
 #include "button.h"
 #include "dht11.h"
 #include "led.h"
+#include "mqtt_mgr.h"
 #include "rgb_led.h"
 #include "settings.h"
 #include "time_mgr.h"
@@ -102,6 +105,49 @@ static app_ctx_t s_ctx;
  * 2000 不是随手取的数：DHT11 手册要求两次读取间隔大于 2 秒。
  */
 #define SAMPLE_INTERVAL_MIN_MS 2000
+
+/*
+ * client_id 的拼装缓冲。
+ *
+ * MQTT 规范要求 client_id 在同一个 broker 上唯一——两个设备用同一个
+ * client_id 连接，后连上的会把先连上的**踢下线**，表现为两台设备轮流掉线，
+ * 而且日志里只有一条语焉不详的 DISCONNECTED。
+ *
+ * 所以默认用 device_id 当 client_id（它本来就该是唯一的），
+ * 另外给一个前缀开关：前缀为空时直接用 device_id（默认，最省事），
+ * 非空时拼成 "<前缀>_<device_id>"——用于同一台设备跑两份固件做对比测试，
+ * 数据要归到同一台设备名下但连接标识不能撞的场景。
+ *
+ * 必须是 static：mqtt_mgr 会把指针交给 esp-mqtt，esp-mqtt 长期持有它
+ * （详见 mqtt_mgr.h 的 @note）。放栈上会留下一根悬空指针。
+ */
+#define CLIENT_ID_MAX 80
+static char s_client_id[CLIENT_ID_MAX];
+
+/**
+ * @brief 按前缀规则拼出 client_id
+ *
+ * @return 始终返回一个全程存活的字符串：前缀为空时就是 device_id 本身
+ *         （它来自 Kconfig，生命周期是全程的）
+ */
+static const char *compose_client_id(const char *prefix, const char *device_id)
+{
+    if (prefix == NULL || prefix[0] == '\0') {
+        return device_id;
+    }
+
+    const int n = snprintf(s_client_id, sizeof(s_client_id), "%s_%s",
+                           prefix, device_id);
+    if (n < 0 || n >= (int)sizeof(s_client_id)) {
+        /*
+         * 截断的 client_id 比不拼更危险：两台设备的前缀部分相同、
+         * device_id 又被截掉，就撞成一个 id 了。所以退回 device_id。
+         */
+        ESP_LOGW(TAG, "client_id 前缀过长，改用 device_id 作为 client_id");
+        return device_id;
+    }
+    return s_client_id;
+}
 
 static esp_err_t init_peripherals(const app_config_t *config)
 {
@@ -241,6 +287,49 @@ static esp_err_t init_peripherals(const app_config_t *config)
         }
     } else {
         ESP_LOGW(TAG, "未联网，跳过时间同步；时间戳用开机毫秒（clock=boot）");
+    }
+
+    /*
+     * ── MQTT ──────────────────────────────────────────────────
+     *
+     * 同样放在 WiFi 之后：esp-mqtt 要用到网络栈。
+     * **不要求已经拿到 IP**——它自己会重试，网络通了自然连上。
+     * 这里也**不等连接完成**：等待是 mqtt_task 的事（它反正要阻塞在
+     * 队列上），启动路径不该被外部服务的响应速度拖住。
+     *
+     * 两种"不启用"的路径要分清：
+     *
+     *   ESP_ERR_INVALID_ARG —— uri 没配。受支持的用法，提示一句。
+     *     此时 mqtt_mgr 的所有查询返回 "disabled"、publish 直接失败，
+     *     mqtt_task 会看到状态是 disabled 并安静地什么都不做。
+     *
+     *   未联网 —— 没有网络接口，连不上任何 broker。跳过初始化，
+     *     免得 esp-mqtt 反复报一些与真正原因无关的错误。
+     *
+     * 其他错误（内存不足之类）记 LOGW 不记 LOGE，也不 return：
+     * 上报是辅助功能，它挂了不影响采集和本地功能。
+     */
+    if (netif_ready) {
+        const mqtt_mgr_config_t mqtt_cfg = {
+            .uri                  = config->mqtt_uri,
+            .device_id            = config->device_id,
+            .username             = config->mqtt_username,
+            .password             = config->mqtt_password,
+            .client_id            = compose_client_id(config->mqtt_client_id_prefix,
+                                                      config->device_id),
+            .keepalive_s          = config->mqtt_keepalive_s,
+            .reconnect_timeout_ms = config->mqtt_reconnect_timeout_ms,
+            .net_timeout_ms       = config->mqtt_net_timeout_ms,
+        };
+        ret = mqtt_mgr_init(&mqtt_cfg);
+        if (ret == ESP_ERR_INVALID_ARG) {
+            ESP_LOGW(TAG, "未配置 MQTT broker，本次不上报（其它功能照常）");
+        } else if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "MQTT 初始化失败（%s），本次不上报",
+                     esp_err_to_name(ret));
+        }
+    } else {
+        ESP_LOGW(TAG, "未联网，跳过 MQTT 初始化；本次不上报");
     }
 
     return ESP_OK;
