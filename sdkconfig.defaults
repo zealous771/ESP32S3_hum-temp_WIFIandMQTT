@@ -116,6 +116,14 @@ CONFIG_MQTT_KEEPALIVE_S=60
 CONFIG_MQTT_RECONNECT_TIMEOUT_MS=5000
 CONFIG_MQTT_NET_TIMEOUT_MS=10000
 
+# ---------- 系统监控（文档 §38） ----------
+# 监控任务周期性打印堆占用、各任务栈水位、WiFi/MQTT 状态、采样计数、
+# 复位原因。这些是排查"死机/重启/内存不足"的唯一线索——
+# 那类问题发生时人不在现场，只能靠事先留下的周期性快照事后回溯。
+#
+# 调栈大小时主要看它的输出：栈水位越接近 0 越危险，余量留 30% 以上。
+CONFIG_MONITOR_INTERVAL_MS=10000
+
 # ---------- esp-mqtt 组件行为 ----------
 # 未连接时**跳过 publish**，而不是把消息塞进内部 outbox。
 #

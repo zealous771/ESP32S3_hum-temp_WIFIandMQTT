@@ -111,6 +111,18 @@ typedef struct {
     uint32_t    mqtt_reconnect_timeout_ms; /*!< 断线重试间隔，毫秒 */
     uint32_t    mqtt_net_timeout_ms;  /*!< 单次网络操作超时，毫秒 */
 
+    /*
+     * 系统监控任务的周期，毫秒（文档 §38）。
+     *
+     * 监控任务会周期性打印堆占用、各任务栈水位、WiFi/MQTT 状态、
+     * 采样计数和复位原因——这些是排查"死机/重启/内存不足"的唯一线索，
+     * 因为那些问题发生时你不在现场。
+     *
+     * 传 0 或过小的值会被兜底成一个下限（组件边界不假设调用方
+     * 一定走过本工程的 Kconfig range）。
+     */
+    uint32_t    monitor_interval_ms;
+
     const uint32_t *periods_ms;   /*!< 闪烁周期表，按键按下时循环切换 */
     size_t period_count;          /*!< 周期表长度，必须 >= 1 */
 } app_config_t;

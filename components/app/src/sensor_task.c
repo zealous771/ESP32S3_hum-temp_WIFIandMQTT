@@ -140,6 +140,30 @@ static void send_to_queue(QueueHandle_t q, const sensor_data_t *d,
     }
 }
 
+/*
+ * 运行统计。放在 static 而不是任务的局部变量，是为了让 monitor_task
+ * 能读到（见 app_internal.h 的 app_sensor_stats_t）。
+ *
+ * 为什么**不加锁**：
+ *   1. 四个字段都是对齐的 uint32，Xtensa 上对它们的读写是单条指令，
+ *      不会出现"读到半个数"的撕裂。
+ *   2. 监控数据的用途是"看出量级和趋势"，允许存在"读的时候
+ *      reads_ok 已经加了、reads_failed 还没加"这种跨字段不一致的窗口
+ *      ——它只在恰好采样计数的那一瞬间存在，且不影响任何判断。
+ *   3. 加锁的代价是采样任务每轮都要进出临界区，而这个任务的核心
+ *      设计原则恰恰是"绝不做任何可能被拖住的事"。
+ *   在"绝对精确"和"采样任务保持无阻塞"之间，后者优先。
+ */
+static app_sensor_stats_t s_stats;
+
+void app_sensor_get_stats(app_sensor_stats_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    *out = s_stats;
+}
+
 void app_sensor_task(void *arg)
 {
     /* pvParameters 传进来的是 &s_ctx，在这里取回自己的上下文 */
@@ -183,16 +207,6 @@ void app_sensor_task(void *arg)
     uint32_t fail_streak = 0;
     uint32_t cycles      = 0;
 
-    /*
-     * 两条队列各自的丢弃计数。**分开记是有意的**：
-     * 它们指向完全不同的故障——
-     *   console 侧丢 = 串口打印被拖住了（不该发生，打印很快）
-     *   mqtt 侧丢    = 网络断了、mqtt_task 故意不消费（预期内的正常现象）
-     * 合成一个计数器的话，这两种情况在日志里长得一模一样。
-     */
-    uint32_t dropped_console = 0;
-    uint32_t dropped_mqtt    = 0;
-
     ESP_LOGI(TAG, "采样任务启动，设备 %s，采样周期 %u ms", d.device_id,
              (unsigned)interval_ms);
 
@@ -203,6 +217,7 @@ void app_sensor_task(void *arg)
         if (ret == ESP_OK) {
             /* 读通了就把欠账清零 */
             fail_streak = 0;
+            s_stats.reads_ok++;
 
             /*
              * 时间戳取单调时钟。esp_timer_get_time() 返回微秒，
@@ -226,8 +241,8 @@ void app_sensor_task(void *arg)
              * 持有一份独立的拷贝。这也是为什么不能用一条队列加两个
              * 消费者（那会变成瓜分），见 app_internal.h 里的说明。
              */
-            send_to_queue(ctx->console_queue, &d, &dropped_console, "console");
-            send_to_queue(ctx->mqtt_queue,    &d, &dropped_mqtt,    "mqtt");
+            send_to_queue(ctx->console_queue, &d, &s_stats.dropped_console, "console");
+            send_to_queue(ctx->mqtt_queue,    &d, &s_stats.dropped_mqtt,    "mqtt");
         } else if (ret == ESP_ERR_INVALID_STATE) {
             /*
              * 这个错误码有两个来源：
@@ -241,6 +256,7 @@ void app_sensor_task(void *arg)
         } else {
             /* 其余都是真失败：超时（器件没应答）、校验错、时序非法 */
             fail_streak++;
+            s_stats.reads_failed++;
 
             if (fail_streak == FAIL_STREAK_HINT) {
                 /*

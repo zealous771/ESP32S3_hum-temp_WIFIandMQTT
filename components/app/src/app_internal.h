@@ -18,8 +18,27 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/task.h"
 
 #include "data_model.h"
+
+/**
+ * @brief 任务编号，用于索引 app_ctx_t::task_handles
+ *
+ * 加新任务的流程里多了一步：在这里加一个枚举值。
+ * 忘了加的话，下面 task_handles[APP_TASK_COUNT] 会因越界而编译失败
+ * ——这是好事，比"静默少监控一个任务"强。
+ */
+typedef enum {
+    APP_TASK_BLINK = 0,
+    APP_TASK_BUTTON,
+    APP_TASK_RGB,
+    APP_TASK_SENSOR,
+    APP_TASK_CONSOLE,
+    APP_TASK_MQTT,
+    APP_TASK_MONITOR,
+    APP_TASK_COUNT          /*!< 哨兵，必须留在最后 */
+} app_task_id_t;
 
 /**
  * @brief 应用的运行期上下文
@@ -116,6 +135,32 @@ typedef struct {
      */
     QueueHandle_t console_queue;
     QueueHandle_t mqtt_queue;
+
+    /*
+     * 系统监控任务的周期，毫秒。
+     *
+     * 来自 app_config_t（Kconfig 的 CONFIG_MONITOR_INTERVAL_MS）。
+     * 只有 monitor_task 用得到，但它和其它任务参数一样统一走上下文，
+     * 免得监控任务去 include sdkconfig.h——那会让 app 组件重新依赖
+     * "本工程的 Kconfig"，破坏"组件可整体复制到别的工程"这个性质。
+     */
+    uint32_t monitor_interval_ms;
+
+    /*
+     * 各任务的句柄，按 app_task_id_t 索引。
+     *
+     * 为什么要存：monitor_task 需要打印**每个任务**的栈水位。
+     * uxTaskGetStackHighWaterMark() 可以传别人的句柄，但前提是拿到句柄——
+     * 而 xTaskCreate() 的输出参数目前都传的是 NULL。
+     *
+     * 另一条路是用 uxTaskGetSystemState() 枚举全部任务，但那需要打开
+     * CONFIG_FREERTOS_USE_TRACE_FACILITY，还要准备一块按任务数动态变化的
+     * 缓冲。为了打印几个数字付这个代价不值得。
+     *
+     * 数组大小由 APP_TASK_COUNT 保证，加任务时枚举和 xTaskCreate 都要改，
+     * 漏改会编译报错（数组越界是编译期错误）而不是静默少打一行。
+     */
+    TaskHandle_t task_handles[APP_TASK_COUNT];
 } app_ctx_t;
 
 /*
@@ -142,6 +187,42 @@ void app_rgb_task(void *arg);
 void app_sensor_task(void *arg);
 void app_console_task(void *arg);
 void app_mqtt_task(void *arg);
+
+/**
+ * @brief 系统监控任务（文档 §38）
+ *
+ * 纯观测，不参与任何业务：周期性地把堆、各任务栈水位、WiFi/MQTT 状态、
+ * 传感器错误计数、复位原因打成一行。它的优先级**低于**所有业务任务，
+ * 因为"看"永远不该和"干"抢资源。
+ */
+void app_monitor_task(void *arg);
+
+/**
+ * @brief 采样侧的运行统计，供监控任务读取
+ *
+ * 这些数字是排查"数据为什么不对"的第一手线索：
+ *   读失败多   → 硬件/接线问题（看 sensor_task 里的上拉电阻提示）
+ *   串口丢弃多 → 打印被拖住（不该发生）
+ *   MQTT 丢弃多 → 网络断了（预期现象，但要能看见）
+ *   两条队列丢弃都多 → 采样本身太快，或者系统整体过载
+ */
+typedef struct {
+    uint32_t reads_ok;         /*!< 累计读取成功次数 */
+    uint32_t reads_failed;     /*!< 累计读取失败次数（不含"未到最小间隔"） */
+    uint32_t dropped_console;  /*!< 因 console_queue 满而丢弃的条数 */
+    uint32_t dropped_mqtt;     /*!< 因 mqtt_queue 满而丢弃的条数 */
+} app_sensor_stats_t;
+
+/**
+ * @brief 读取采样侧的运行统计
+ *
+ * 可以从任意任务调用。内部只是把几个 uint32 拷出来，不加锁——
+ * 理由见 sensor_task.c 里的说明（对齐的 32 位读在 Xtensa 上不会撕裂，
+ * 而监控数据允许存在"跨字段不一致"的窗口，为它加锁不划算）。
+ *
+ * @param out 输出。为 NULL 时什么也不做
+ */
+void app_sensor_get_stats(app_sensor_stats_t *out);
 
 /**
  * @brief 记录**当前任务**的栈使用水位

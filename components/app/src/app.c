@@ -99,6 +99,33 @@ static app_ctx_t s_ctx;
 #define MQTT_TASK_PRIO     5
 
 /*
+ * 系统监控任务（文档 §38）。
+ *
+ * 优先级 **4，低于所有业务任务**：监控是"看"，不该和"干"抢资源。
+ * 只要有任何业务任务就绪，它就等着；它的周期是 10 秒量级，
+ * 晚几百毫秒完全不影响判断。反过来给它高优先级，每次醒来都会打断
+ * 采样、打印、上报——为了一个观测动作牺牲业务实时性，是本末倒置。
+ *
+ * 栈 3072：它每轮要拼两行较长的日志（含 7 个任务的栈水位），
+ * 格式化仍然是最吃栈的操作。具体数值靠它自己上报的水位来收敛。
+ */
+#define MONITOR_TASK_NAME  "monitor"
+#define MONITOR_TASK_STACK 3072
+#define MONITOR_TASK_PRIO  4
+
+/*
+ * 监控周期的兜底下限。
+ *
+ * 为什么要防这一手：与采样周期同理，传 0 会让 vTaskDelay(0) 变成
+ * 不阻塞的紧循环——监控任务会以 CPU 全速刷日志，把串口冲垮，
+ * 真正有用的输出全被冲走。而"周期设成 0"看起来像"关掉监控"，
+ * 实际效果正好相反。
+ *
+ * 2 秒已经是很密的监控了，再密没有诊断价值，只有日志噪声。
+ */
+#define MONITOR_INTERVAL_MIN_MS 2000
+
+/*
  * 采样队列深度。**两条队列用同一个深度**。
  *
  * 深度决定"消费者能落后多久"。消费者按 2 秒一条的速度消费，
@@ -384,39 +411,66 @@ static esp_err_t create_tasks(void)
      * 不需要访问任何全局变量。rgb_task 用不到上下文，
      * 但保持一致的传参方式，以后它要加参数时不用改调用处。
      */
+    /*
+     * xTaskCreate 的最后一个参数是"句柄输出"。这里**不再传 NULL**，
+     * 而是存进 s_ctx.task_handles[]——monitor_task 需要拿它去读
+     * 各个任务的栈水位（uxTaskGetStackHighWaterMark 可以传别人的句柄）。
+     *
+     * 用 APP_TASK_* 枚举做下标，而不是自己数第几个：加任务时忘了改
+     * 枚举会编译报错（数组越界），忘了改下标则会静默把句柄存错位置，
+     * 后者更难发现。
+     */
     if (xTaskCreate(app_blink_task, BLINK_TASK_NAME, BLINK_TASK_STACK,
-                    &s_ctx, BLINK_TASK_PRIO, NULL) != pdPASS) {
+                    &s_ctx, BLINK_TASK_PRIO,
+                    &s_ctx.task_handles[APP_TASK_BLINK]) != pdPASS) {
         ESP_LOGE(TAG, "创建闪烁任务失败");
         return ESP_ERR_NO_MEM;
     }
 
     if (xTaskCreate(app_button_task, BUTTON_TASK_NAME, BUTTON_TASK_STACK,
-                    &s_ctx, BUTTON_TASK_PRIO, NULL) != pdPASS) {
+                    &s_ctx, BUTTON_TASK_PRIO,
+                    &s_ctx.task_handles[APP_TASK_BUTTON]) != pdPASS) {
         ESP_LOGE(TAG, "创建按键任务失败");
         return ESP_ERR_NO_MEM;
     }
 
     if (xTaskCreate(app_rgb_task, RGB_TASK_NAME, RGB_TASK_STACK,
-                    &s_ctx, RGB_TASK_PRIO, NULL) != pdPASS) {
+                    &s_ctx, RGB_TASK_PRIO,
+                    &s_ctx.task_handles[APP_TASK_RGB]) != pdPASS) {
         ESP_LOGE(TAG, "创建 RGB 任务失败");
         return ESP_ERR_NO_MEM;
     }
 
     if (xTaskCreate(app_sensor_task, SENSOR_TASK_NAME, SENSOR_TASK_STACK,
-                    &s_ctx, SENSOR_TASK_PRIO, NULL) != pdPASS) {
+                    &s_ctx, SENSOR_TASK_PRIO,
+                    &s_ctx.task_handles[APP_TASK_SENSOR]) != pdPASS) {
         ESP_LOGE(TAG, "创建采样任务失败");
         return ESP_ERR_NO_MEM;
     }
 
     if (xTaskCreate(app_console_task, CONSOLE_TASK_NAME, CONSOLE_TASK_STACK,
-                    &s_ctx, CONSOLE_TASK_PRIO, NULL) != pdPASS) {
+                    &s_ctx, CONSOLE_TASK_PRIO,
+                    &s_ctx.task_handles[APP_TASK_CONSOLE]) != pdPASS) {
         ESP_LOGE(TAG, "创建串口消费者任务失败");
         return ESP_ERR_NO_MEM;
     }
 
     if (xTaskCreate(app_mqtt_task, MQTT_TASK_NAME, MQTT_TASK_STACK,
-                    &s_ctx, MQTT_TASK_PRIO, NULL) != pdPASS) {
+                    &s_ctx, MQTT_TASK_PRIO,
+                    &s_ctx.task_handles[APP_TASK_MQTT]) != pdPASS) {
         ESP_LOGE(TAG, "创建 MQTT 上报任务失败");
+        return ESP_ERR_NO_MEM;
+    }
+
+    /*
+     * 监控任务放最后建。顺序上其实无所谓（它只读不写），
+     * 但放最后有个实际好处：如果前面任何一个任务建失败，本函数会
+     * 提前 return，不会留下一个"在报告不存在的任务"的监控任务。
+     */
+    if (xTaskCreate(app_monitor_task, MONITOR_TASK_NAME, MONITOR_TASK_STACK,
+                    &s_ctx, MONITOR_TASK_PRIO,
+                    &s_ctx.task_handles[APP_TASK_MONITOR]) != pdPASS) {
+        ESP_LOGE(TAG, "创建监控任务失败");
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
@@ -466,6 +520,18 @@ esp_err_t app_start(const app_config_t *config)
                  (unsigned)s_ctx.sample_interval_ms,
                  (unsigned)SAMPLE_INTERVAL_MIN_MS);
         s_ctx.sample_interval_ms = SAMPLE_INTERVAL_MIN_MS;
+    }
+
+    /*
+     * 监控周期兜底。理由与上面完全一致：0 会让 vTaskDelay(0) 变成
+     * 不阻塞的紧循环，监控任务反而把串口冲垮。
+     */
+    s_ctx.monitor_interval_ms = config->monitor_interval_ms;
+    if (s_ctx.monitor_interval_ms < MONITOR_INTERVAL_MIN_MS) {
+        ESP_LOGW(TAG, "监控周期 %u ms 过短，改用 %u ms",
+                 (unsigned)s_ctx.monitor_interval_ms,
+                 (unsigned)MONITOR_INTERVAL_MIN_MS);
+        s_ctx.monitor_interval_ms = MONITOR_INTERVAL_MIN_MS;
     }
 
     /*

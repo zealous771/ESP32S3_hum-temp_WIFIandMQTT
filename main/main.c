@@ -174,6 +174,9 @@ void app_main(void)
         .mqtt_reconnect_timeout_ms = CONFIG_MQTT_RECONNECT_TIMEOUT_MS,
         .mqtt_net_timeout_ms      = CONFIG_MQTT_NET_TIMEOUT_MS,
 
+        /* 系统监控周期（文档 §38） */
+        .monitor_interval_ms      = CONFIG_MONITOR_INTERVAL_MS,
+
         .periods_ms          = k_periods_ms,
         .period_count        = sizeof(k_periods_ms) / sizeof(k_periods_ms[0]),
     };
