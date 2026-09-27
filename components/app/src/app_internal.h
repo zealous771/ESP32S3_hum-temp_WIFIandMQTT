@@ -78,17 +78,44 @@ typedef struct {
     const char *device_id;
 
     /*
-     * 采样队列：app_sensor_task 写入，消费者任务读出。
+     * 采样管道的两条队列。**它们装的是同样的内容，但互不干扰**。
      *
-     * 队列元素是**按值拷贝**的 sensor_data_t（不是指针），
+     * ★ 为什么是两条而不是一条？
+     *
+     *   FreeRTOS 的队列是**出队**语义：xQueueReceive() 会把元素从队列里
+     *   摘走。所以"两个任务读同一条队列"不是广播，而是**瓜分**——
+     *   每条记录只会落到其中一个任务手里，两个消费者各自都会看到
+     *   大约一半的数据缺失。这是个很容易踩的坑，因为它在低负载下
+     *   表现得像"偶尔丢一两条"，很难联想到队列语义。
+     *
+     *   要实现"一份数据、多个消费者都拿到"，只有两条路：
+     *     ① 每个消费者一条独立队列，生产者分别投递（本工程的做法）
+     *     ② 生产者投一条队列，由一个中间任务读出后再分发给下游
+     *   ①更简单，也不引入额外任务，代价只是多一份队列内存。
+     *
+     * 为什么两条队列的分工正好是"串口"和"MQTT"：
+     *
+     *   console_queue —— 串口打印用。**永不阻塞消费**，所以它永远是空的，
+     *                    传感器投递永远成功。它的存在让"采样是否还在跑"
+     *                    这件事在断网时依然可见。
+     *
+     *   mqtt_queue    —— 上报用。mqtt_task 在**未连接时故意不消费**，
+     *                    于是它会填满，sensor_task 对它投递失败并计数。
+     *                    这样"网络断了导致丢数据"只影响上报这一路，
+     *                    不会让串口那一侧也安静下来——两种故障因此
+     *                    可以被区分开。
+     *
+     * 两条队列的元素都是**按值拷贝**的 sensor_data_t（不是指针），
      * 所以元素在队列里是自包含的，取出时不需要关心生产者的栈。
      *
-     * 这是本工程第三条队列，三条的语义各不相同，别混：
+     * 本工程一共四条队列，语义各不相同，别混：
      *   button 组件的 s_event_queue —— ISR → button_task（按键事件）
      *   ctx->period_queue           —— button_task → blink_task（新周期）
-     *   ctx->sensor_queue           —— sensor_task → console_task / 未来的 mqtt_task
+     *   ctx->console_queue          —— sensor_task → console_task（打印）
+     *   ctx->mqtt_queue             —— sensor_task → mqtt_task（上报）
      */
-    QueueHandle_t sensor_queue;
+    QueueHandle_t console_queue;
+    QueueHandle_t mqtt_queue;
 } app_ctx_t;
 
 /*
@@ -102,16 +129,19 @@ void app_button_task(void *arg);
 void app_rgb_task(void *arg);
 
 /*
- * 采样管道被拆成"生产者 + 消费者"两端，分别对应两个任务：
+ * 采样管道被拆成"一个生产者 + 两个消费者"：
  *
- *   app_sensor_task   读传感器 → 队列（只管采集，不碰任何输出）
- *   app_console_task  队列 → 串口 JSON（第一个消费者，也是常驻诊断通道）
+ *   app_sensor_task   读传感器 → 同时投递到两条队列（只管采集，不碰输出）
+ *   app_console_task  console_queue → 串口 JSON（不依赖网络，常驻诊断通道）
+ *   app_mqtt_task     mqtt_queue → publish 到 broker（断网时不消费，让队列积压）
  *
  * 为什么不是一个任务干完？见 sensor_task.c 文件头——核心是
  * "采样节奏不能被任何输出侧的阻塞拖垮"。
+ * 为什么是两个消费者而不是一个？见上面两条队列的说明。
  */
 void app_sensor_task(void *arg);
 void app_console_task(void *arg);
+void app_mqtt_task(void *arg);
 
 /**
  * @brief 记录**当前任务**的栈使用水位

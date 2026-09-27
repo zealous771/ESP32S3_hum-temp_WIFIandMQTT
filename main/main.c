@@ -11,7 +11,8 @@
  *   button_task.c   按键任务
  *   rgb_task.c      可寻址 RGB 任务
  *   sensor_task.c   温湿度采样任务（生产者：只采集，不输出）
- *   console_task.c  串口消费者（把采样队列里的记录打成 JSON）
+ *   console_task.c  串口消费者（把记录打成 JSON，不依赖网络）
+ *   mqtt_task.c     MQTT 消费者（把记录 publish 到 broker）
  *
  * 为什么这样分：main 在 ESP-IDF 里是个特殊组件（总是被编译、总是第一个运行）。
  * 如果把任务都堆在这里，每加一个功能入口文件就长一截，很快读不动了。
@@ -37,23 +38,34 @@
  *
  *   RGB GPIO ◀── RMT 外设 ◀── rgb_led 组件 ◀── app/rgb_task（独立循环色相）
  *
- *   ┌──────────── 采样管道（生产者 / 消费者解耦） ─────────────┐
+ *   ┌────────── 采样管道（一个生产者 / 两个消费者）────────────┐
  *   │                                                          │
  *   │  DHT11 数据线 ◀── 单总线时序 ◀── dht11 组件               │
  *   │                                    │                     │
  *   │                              app/sensor_task             │
  *   │                              （只采样，绝不阻塞）          │
  *   │                                    │                     │
- *   │                          Queue<sensor_data_t>            │
- *   │                                    │                     │
- *   │                          app/console_task                │
- *   │                          （格式化成 JSON，串口打印）        │
+ *   │                     ┌──────────────┴──────────────┐      │
+ *   │                     ▼                             ▼      │
+ *   │            Queue console_queue          Queue mqtt_queue │
+ *   │                     │                             │      │
+ *   │             app/console_task                app/mqtt_task│
+ *   │             （格式化成 JSON 打串口）      （publish 到    │
+ *   │              不依赖网络，断网时照常打印      broker）     │
  *   └──────────────────────────────────────────────────────────┘
- *                         下一轮接 MQTT 时，mqtt_task 会成为
- *                         这条队列的**第二个消费者**，
- *                         采样侧一行都不用改。
  *
- *   WiFi ◀── wifi_mgr 组件（Station 模式）──▶ console_task 查连接状态
+ *   为什么是两条队列而不是一条加两个消费者：xQueueReceive 是**出队**
+ *   语义，两个任务读同一条队列会变成瓜分数据而不是广播。
+ *   详见 components/app/src/app_internal.h。
+ *
+ *   两个消费者还有一个刻意的行为差异：mqtt_task 在未连接时**不消费**
+ *   队列（让它积压，重连后补发），而 console_task 永远在消费。
+ *   于是"网络断了导致丢数据"只影响上报那一路，串口照常一行一行地打——
+ *   两种故障因此可以被区分开。
+ *
+ *   WiFi ◀── wifi_mgr 组件（Station 模式）
+ *   NTP  ◀── time_mgr 组件（SNTP，把开机毫秒锚定成 Unix 毫秒）
+ *   broker ◀── mqtt_mgr 组件（连接管理 + publish，带 LWT 在线状态）
  */
 #include <stdint.h>
 

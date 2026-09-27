@@ -80,18 +80,43 @@ static app_ctx_t s_ctx;
 #define CONSOLE_TASK_PRIO  5
 
 /*
- * 采样队列深度。
+ * MQTT 上报任务。
+ *
+ * 栈给 4096：它每轮要 app_collect_meta()（查 WiFi 状态 + RSSI + 时间）
+ * 再 snprintf 拼一行报文，和 console_task 的栈开销同量级。
+ *
+ * 注意**协议栈本身不跑在这个栈上**——esp-mqtt 有自己的任务
+ * （见 mqtt_mgr.c 里的 MQTT_MGR_TASK_STACK），报文编解码、收发缓冲
+ * 都在那边。本任务只是"取数据 → 拼串 → 交给 esp-mqtt"，所以不需要
+ * 把协议栈那几 KB 算进来。
+ *
+ * 优先级与其它任务同为 5，**不要给它更高的优先级**：
+ * 上报是这条链路的末端，让它抢 CPU 只会压缩采样和打印的时间片，
+ * 而它对时效性的要求反而是最低的（数据晚几百毫秒发出去没有影响）。
+ */
+#define MQTT_TASK_NAME     "mqtt"
+#define MQTT_TASK_STACK    4096
+#define MQTT_TASK_PRIO     5
+
+/*
+ * 采样队列深度。**两条队列用同一个深度**。
  *
  * 深度决定"消费者能落后多久"。消费者按 2 秒一条的速度消费，
  * 深度 8 意味着消费者可以卡住约 16 秒而不丢数据——足够覆盖
  * 一次短暂的网络抖动或日志阻塞。
  *
+ * 对 mqtt_queue 来说这个数字还有一层含义：它同时是"断网期间能
+ * 缓存多少条"。16 秒的断网一条不丢，更长的就会丢（由 sensor_task
+ * 计数、seq 跳号体现）。
+ *
  * 为什么不做得很深（比如 100）：队列元素是**按值拷贝**的，
- * 深度直接乘上 sizeof(sensor_data_t)（约 56 字节）就是常驻内存。
- * 而队列真正的职责是"吸收抖动"，不是"长期囤数据"——
+ * 深度直接乘上 sizeof(sensor_data_t)（约 56 字节）再乘队列条数
+ * 就是常驻内存。而队列真正的职责是"吸收抖动"，不是"长期囤数据"——
  * 消费者要是持续跟不上，囤多少都不够，这时正确的做法是
  * 落盘（NVS/Flash，见文档 §37）或者干脆丢弃，而不是把 RAM 吃光。
  * 在只有 512KB 内部 SRAM 的 S3 上，"加深队列"是个会反噬的选项。
+ *
+ * 当前内存代价：2 条队列 × 8 深 × 56 字节 ≈ 900 字节。
  */
 #define SENSOR_QUEUE_DEPTH 8
 
@@ -338,23 +363,24 @@ static esp_err_t init_peripherals(const app_config_t *config)
 static esp_err_t create_tasks(void)
 {
     /*
-     * 五个任务的优先级都给 5——它们互不抢占，靠各自的阻塞调用自然协作：
+     * 六个任务的优先级都给 5——它们互不抢占，靠各自的阻塞调用自然协作：
      * blink 和 button 阻塞在队列上，rgb 阻塞在延时上，
-     * sensor 阻塞在采样周期的延时上，console 阻塞在采样队列上。
+     * sensor 阻塞在采样周期的延时上，console 阻塞在 console_queue 上，
+     * mqtt 阻塞在 mqtt_queue 上（未连接时则睡在 1 秒的轮询延时上）。
      *
      * 如果按键要求响应更快，可以把 button_task 提到 6。
      *
-     * 特别说一下 sensor 和 console 这对生产/消费者为什么同为 5 也不会出问题：
-     *   两者都在阻塞调用上等待（vTaskDelay / xQueueReceive），
+     * 特别说一下 sensor 和两个消费者为什么同为 5 也不会出问题：
+     *   它们都在阻塞调用上等待（vTaskDelay / xQueueReceive），
      *   不会出现"高优先级忙等把低优先级饿死"的经典问题。
      *   就算 sensor 被提到 6，也只是让"读传感器"更及时，
-     *   因为 console 拿不到 CPU 而丢数据的情况不会发生——
+     *   因为消费者拿不到 CPU 而丢数据的情况不会发生——
      *   队列深度 8 已经吸收了这种抖动。
      *   真正要警惕的是"给生产者更高优先级 + 队列满时阻塞发送"这个组合，
      *   那会让采样任务在高优先级上把消费者彻底饿死。本工程用的是
      *   非阻塞发送（超时 0），从设计上就绕开了这个坑。
      *
-     * pvParameters 传 &s_ctx：任务通过它拿到周期表、队列和设备标识，
+     * pvParameters 传 &s_ctx：任务通过它拿到周期表、两条队列和设备标识，
      * 不需要访问任何全局变量。rgb_task 用不到上下文，
      * 但保持一致的传参方式，以后它要加参数时不用改调用处。
      */
@@ -385,6 +411,12 @@ static esp_err_t create_tasks(void)
     if (xTaskCreate(app_console_task, CONSOLE_TASK_NAME, CONSOLE_TASK_STACK,
                     &s_ctx, CONSOLE_TASK_PRIO, NULL) != pdPASS) {
         ESP_LOGE(TAG, "创建串口消费者任务失败");
+        return ESP_ERR_NO_MEM;
+    }
+
+    if (xTaskCreate(app_mqtt_task, MQTT_TASK_NAME, MQTT_TASK_STACK,
+                    &s_ctx, MQTT_TASK_PRIO, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "创建 MQTT 上报任务失败");
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
@@ -478,17 +510,29 @@ esp_err_t app_start(const app_config_t *config)
     }
 
     /*
-     * 采样队列。这是"采样与输出解耦"的物理载体——
-     * 生产者（sensor_task）和消费者（console_task / 未来的 mqtt_task）
-     * 之间唯一的连接点，两侧互相不知道对方的存在。
+     * 采样管道的两条队列。这是"采样与输出解耦"的物理载体——
+     * 生产者（sensor_task）和两个消费者之间唯一的连接点，
+     * 两侧互相不知道对方的存在。
+     *
+     * ★ 为什么是两条而不是一条（详见 app_internal.h 的说明）：
+     *   FreeRTOS 队列是**出队**语义，xQueueReceive() 会把元素摘走。
+     *   两个任务读同一条队列不是广播而是**瓜分**——每条记录只会落到
+     *   其中一个任务手里，两边各自都会看到约一半的数据缺失。
+     *   所以每个消费者各配一条队列，由生产者分别投递。
      *
      * 元素大小是 sizeof(sensor_data_t)，按值拷贝。队列一旦创建，
-     * 元素大小就固定了，所以 sensor_data_t 以后加字段（比如 rssi）
-     * 不需要改这里——sizeof 会自动跟着变。
+     * 元素大小就固定了，所以 sensor_data_t 以后加字段不需要改这里
+     * ——sizeof 会自动跟着变。
      */
-    s_ctx.sensor_queue = xQueueCreate(SENSOR_QUEUE_DEPTH, sizeof(sensor_data_t));
-    if (s_ctx.sensor_queue == NULL) {
-        ESP_LOGE(TAG, "创建采样队列失败");
+    s_ctx.console_queue = xQueueCreate(SENSOR_QUEUE_DEPTH, sizeof(sensor_data_t));
+    if (s_ctx.console_queue == NULL) {
+        ESP_LOGE(TAG, "创建串口队列失败");
+        return ESP_ERR_NO_MEM;
+    }
+
+    s_ctx.mqtt_queue = xQueueCreate(SENSOR_QUEUE_DEPTH, sizeof(sensor_data_t));
+    if (s_ctx.mqtt_queue == NULL) {
+        ESP_LOGE(TAG, "创建上报队列失败");
         return ESP_ERR_NO_MEM;
     }
 

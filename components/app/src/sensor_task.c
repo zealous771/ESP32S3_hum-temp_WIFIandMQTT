@@ -3,6 +3,11 @@
  *
  * 职责被刻意收窄成一件事：**按固定周期把一次采样结果放进队列**。
  *
+ * 注意是**两条**队列：一条给串口打印（console_task），一条给 MQTT 上报
+ * （mqtt_task）。为什么不是一条队列加两个消费者，见 app_internal.h
+ * 里 "为什么是两条而不是一条" 的说明——简单说：xQueueReceive 是出队语义，
+ * 两个消费者读同一条队列会变成瓜分数据，不是广播。
+ *
  * 它不再格式化报文、不再打印、不查 WiFi 状态。那些都属于"输出"，
  * 现在归队列另一头的消费者（console_task，将来是 mqtt_task）。
  *
@@ -33,6 +38,10 @@
  *   并且 seq 跳号会如实记录下这件事。
  *   （真要"一条不丢"，正确做法是把队列换成 NVS/Flash 落盘，
  *     而不是让生产者在这里等——见文档 §37 的后续升级。）
+ *
+ *   两条队列各自独立丢弃，计数也分开记：串口侧丢说明打印被拖住了，
+ *   MQTT 侧丢说明网络断了（mqtt_task 在未连接时故意不消费）。
+ *   合成一个计数器的话，这两种完全不同的故障在日志里长得一模一样。
  *
  * 三个沿用下来的判断（原 telemetry_task 里的结论，继续有效）：
  *
@@ -100,6 +109,37 @@ static const char *TAG = "sensor";
  */
 #define DROP_HINT_EVERY 10
 
+/**
+ * @brief 把一条记录投给某条队列，满了就丢并计数
+ *
+ * 为什么两条队列共用一个函数：投递策略完全一样（0 超时、满就丢、计数、
+ * 限速告警），差别只有"投给谁"。写成函数是为了让下面主循环里那两行
+ * 一眼能看出"是同样的处理"，而不是两段看起来像复制粘贴的代码。
+ *
+ * @param q       目标队列
+ * @param d       要投递的记录
+ * @param dropped 该队列的累计丢弃计数（调用方持有，本函数只递增）
+ * @param who     队列名，只用于日志。必须与 ctx 里的字段名对得上，
+ *                否则日志会把人引到错误的队列上
+ */
+static void send_to_queue(QueueHandle_t q, const sensor_data_t *d,
+                          uint32_t *dropped, const char *who)
+{
+    /*
+     * 超时参数 0 = 队列满就丢，绝不阻塞。理由见文件头。
+     *
+     * 注意这里用 != pdTRUE 判断，而不是 ESP_ERROR_CHECK 之类——
+     * 丢数据是**预期内的正常分支**（消费者卡住时必然发生），
+     * 不是编程错误，更不该触发 abort。
+     */
+    if (xQueueSend(q, d, 0) != pdTRUE) {
+        if (++(*dropped) % DROP_HINT_EVERY == 0) {
+            ESP_LOGW(TAG, "%s 队列已满，累计丢弃 %u 条（消费者跟不上？）",
+                     who, (unsigned)*dropped);
+        }
+    }
+}
+
 void app_sensor_task(void *arg)
 {
     /* pvParameters 传进来的是 &s_ctx，在这里取回自己的上下文 */
@@ -142,7 +182,16 @@ void app_sensor_task(void *arg)
     uint32_t seq         = 0;
     uint32_t fail_streak = 0;
     uint32_t cycles      = 0;
-    uint32_t dropped     = 0;
+
+    /*
+     * 两条队列各自的丢弃计数。**分开记是有意的**：
+     * 它们指向完全不同的故障——
+     *   console 侧丢 = 串口打印被拖住了（不该发生，打印很快）
+     *   mqtt 侧丢    = 网络断了、mqtt_task 故意不消费（预期内的正常现象）
+     * 合成一个计数器的话，这两种情况在日志里长得一模一样。
+     */
+    uint32_t dropped_console = 0;
+    uint32_t dropped_mqtt    = 0;
 
     ESP_LOGI(TAG, "采样任务启动，设备 %s，采样周期 %u ms", d.device_id,
              (unsigned)interval_ms);
@@ -167,18 +216,18 @@ void app_sensor_task(void *arg)
             d.seq          = ++seq;
 
             /*
-             * 超时参数 0 = 队列满就丢，绝不阻塞。理由见文件头。
+             * 分别投给两条队列。
              *
-             * 注意这里用 != pdTRUE 判断，而不是 ESP_ERROR_CHECK 之类——
-             * 丢数据是**预期内的正常分支**（消费者卡住时必然发生），
-             * 不是编程错误，更不该触发 abort。
+             * 顺序上**先串口后 MQTT**，但不是因为顺序重要（两条队列互不
+             * 影响），而是因为读代码时先看到"这条数据一定会被打印出来"，
+             * 心里更踏实——调试时串口那一路是最可靠的观测手段。
+             *
+             * 注意这不是"广播"：xQueueSend 是各投一份，两条队列各自
+             * 持有一份独立的拷贝。这也是为什么不能用一条队列加两个
+             * 消费者（那会变成瓜分），见 app_internal.h 里的说明。
              */
-            if (xQueueSend(ctx->sensor_queue, &d, 0) != pdTRUE) {
-                if (++dropped % DROP_HINT_EVERY == 0) {
-                    ESP_LOGW(TAG, "采样队列已满，累计丢弃 %u 条（消费者跟不上？）",
-                             (unsigned)dropped);
-                }
-            }
+            send_to_queue(ctx->console_queue, &d, &dropped_console, "console");
+            send_to_queue(ctx->mqtt_queue,    &d, &dropped_mqtt,    "mqtt");
         } else if (ret == ESP_ERR_INVALID_STATE) {
             /*
              * 这个错误码有两个来源：
