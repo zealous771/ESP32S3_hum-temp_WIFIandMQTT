@@ -180,6 +180,32 @@ esp_err_t wifi_mgr_wait_connected(uint32_t timeout_ms);
  */
 bool wifi_mgr_is_connected(void);
 
+/**
+ * @brief 读取当前 AP 的信号强度
+ *
+ * 数据来源是 **WiFi 驱动自己维护的连接记录**（`esp_wifi_sta_get_ap_info()`），
+ * 不是本次事件里的快照——所以任意时刻读到的都是"此刻"的值，而不是
+ * "上次断线时"的旧值。
+ *
+ * 不需要网络接口句柄：RSSI 是链路层信息，驱动直接就能回答，
+ * 与 lwIP / DHCP 那一层无关。
+ *
+ * @note 返回值有符号，单位 dBm，**越接近 0 越强**：
+ *         -30 极强（贴着路由器）、-67 良好、-80 偏弱、-90 边缘。
+ *       注意 0 是一个**合法且极强**的读数，不是"未知"——
+ *       调用方不能用 0 当"没读到"的哨兵，必须看本函数的返回值。
+ *
+ * @param rssi 输出。函数成功返回时才会被写入；失败时内容未定义
+ * @return
+ *      - ESP_OK                  成功
+ *      - ESP_ERR_INVALID_ARG     rssi 为 NULL
+ *      - ESP_ERR_WIFI_NOT_CONNECT 尚未初始化，或当前没连上 AP
+ *                                （两者都归到这里：对调用方来说
+ *                                 "读不到 RSSI"是同一件事）
+ *      - 其他                    透传 esp_wifi_sta_get_ap_info() 的错误码
+ */
+esp_err_t wifi_mgr_get_rssi(int8_t *rssi);
+
 #ifdef __cplusplus
 }
 #endif

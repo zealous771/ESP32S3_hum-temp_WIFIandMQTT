@@ -23,6 +23,7 @@
 #include "led.h"
 #include "rgb_led.h"
 #include "settings.h"
+#include "time_mgr.h"
 #include "wifi_mgr.h"
 
 static const char *TAG = "app";
@@ -161,6 +162,17 @@ static esp_err_t init_peripherals(const app_config_t *config)
         .password           = config->wifi_password,
         .connect_timeout_ms = config->wifi_connect_timeout_ms,
     };
+
+    /*
+     * 记录"网络接口是否已就绪"。
+     *
+     * 为什么需要这个标志：SNTP 依赖**默认事件循环**和**默认网络接口**，
+     * 而那两个是 wifi_mgr_init() 建的。空 SSID 时它们根本不存在，
+     * 这时若照调 esp_netif_sntp_init()，它会在初始化网络层时失败，
+     * 打出一串与真正原因无关的错误。与其事后猜，不如在这里显式分流。
+     */
+    bool netif_ready = false;
+
     ret = wifi_mgr_init(&wifi_cfg);
     if (ret == ESP_ERR_INVALID_ARG) {
         ESP_LOGW(TAG, "未配置 WiFi 名称，本次不联网（其它功能照常）");
@@ -189,7 +201,48 @@ static esp_err_t init_peripherals(const app_config_t *config)
             ESP_LOGW(TAG, "等待 WiFi 连接超时（%s），继续启动；连上后会自动恢复",
                      esp_err_to_name(ret));
         }
+
+        /* 走到这个 else 分支就说明 wifi_mgr_init() 成功了，网络接口已存在 */
+        netif_ready = true;
     }
+
+    /*
+     * ── 时间同步 ──────────────────────────────────────────────
+     *
+     * 放在 WiFi 之后，因为 SNTP 要借 WiFi 建好的网络接口和事件循环。
+     *
+     * **不等它同步完成**。SNTP 是异步的：要等 DNS 解析、等 UDP 往返，
+     * 服务器不可达时还要退避重试，整个过程可能几秒到几十秒。
+     * 在启动路径上等它，等于把"启动耗时"交给一个外部服务器的响应速度
+     * 决定——这是不可接受的。同步完成时会由 time_mgr 的回调打一条日志，
+     * 那时候时间戳自然就变成 Unix 毫秒了。
+     *
+     * 三种结果的处理都不同，注意区分：
+     *
+     *   ESP_ERR_INVALID_ARG —— NTP 服务器没配。这是**受支持的用法**
+     *     （与空 SSID 同一模式），不是故障，所以只是提示一句。
+     *     报文时间戳恒为开机毫秒，clock 字段会标成 "boot"。
+     *
+     *   其他错误 —— 时间同步是**辅助功能**：它失败只影响时间戳的基准，
+     *     采集、上报、本地功能一个都不受影响。所以记 LOGW 不记 LOGE，
+     *     更不能让它阻断启动（这里不 return）。
+     *
+     *   未联网 —— 没有网络接口，SNTP 无从谈起，直接跳过。
+     *     这里不调 time_mgr_init()，避免它在缺 netif 时报出无关的错误。
+     */
+    if (netif_ready) {
+        const time_mgr_config_t time_cfg = { .server = config->ntp_server };
+        ret = time_mgr_init(&time_cfg);
+        if (ret == ESP_ERR_INVALID_ARG) {
+            ESP_LOGW(TAG, "未配置 NTP 服务器，时间戳用开机毫秒（clock=boot）");
+        } else if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "时间同步初始化失败（%s），时间戳退回开机毫秒",
+                     esp_err_to_name(ret));
+        }
+    } else {
+        ESP_LOGW(TAG, "未联网，跳过时间同步；时间戳用开机毫秒（clock=boot）");
+    }
+
     return ESP_OK;
 }
 

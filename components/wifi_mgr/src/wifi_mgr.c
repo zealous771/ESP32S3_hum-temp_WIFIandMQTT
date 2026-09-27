@@ -584,3 +584,42 @@ bool wifi_mgr_is_connected(void)
      */
     return (xEventGroupGetBits(s_event_group) & WIFI_MGR_CONNECTED_BIT) != 0;
 }
+
+esp_err_t wifi_mgr_get_rssi(int8_t *rssi)
+{
+    if (rssi == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /*
+     * 先自己判一次连接状态，而不是直接问驱动。
+     *
+     * 为什么？esp_wifi_sta_get_ap_info() 在"没连上"和"驱动根本没启动"
+     * 两种情况下都返回 ESP_ERR_WIFI_NOT_CONNECT，但对调用方来说这两个
+     * 是不同的排查方向（前者是路由器的问题，后者是 app.c 的编排问题）。
+     * 这里统一归到 ESP_ERR_WIFI_NOT_CONNECT 是**有意**的：
+     * 调用方（上报任务）对两者的处理完全一样——"这次报文里 RSSI 填 null"，
+     * 所以没必要多分一类错误码让它去写分支。
+     *
+     * 顺带好处：wifi_mgr_is_connected() 读的是事件组里的内存标志，
+     * 不碰驱动，比直接调驱动便宜。
+     */
+    if (!wifi_mgr_is_connected()) {
+        return ESP_ERR_WIFI_NOT_CONNECT;
+    }
+
+    /*
+     * 这是**链路层**查询，不经过 lwIP。
+     * 之所以要单独取一次而不是在事件回调里缓存：RSSI 是随环境持续变化的
+     * 物理量（人走过去都会让读数跳几个 dBm），缓存下来只会得到过期的值。
+     * 每次上报时现读，代价是几条指令。
+     */
+    wifi_ap_record_t ap_info;
+    const esp_err_t ret = esp_wifi_sta_get_ap_info(&ap_info);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    *rssi = ap_info.rssi;
+    return ESP_OK;
+}

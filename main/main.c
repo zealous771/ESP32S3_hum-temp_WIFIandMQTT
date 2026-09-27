@@ -141,6 +141,12 @@ void app_main(void)
         .wifi_password           = CONFIG_WIFI_PASSWORD,
         .wifi_connect_timeout_ms = WIFI_CONNECT_TIMEOUT_MS,
 
+        /*
+         * NTP 服务器。留空表示不做时间同步，报文时间戳为开机毫秒
+         * （clock 字段标成 "boot"）——这是受支持的用法，不是错误。
+         */
+        .ntp_server              = CONFIG_NTP_SERVER,
+
         .periods_ms          = k_periods_ms,
         .period_count        = sizeof(k_periods_ms) / sizeof(k_periods_ms[0]),
     };

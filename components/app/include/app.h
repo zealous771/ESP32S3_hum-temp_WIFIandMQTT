@@ -82,6 +82,17 @@ typedef struct {
     const char *wifi_password;    /*!< WiFi 密码；开放网络传空串 */
     uint32_t wifi_connect_timeout_ms; /*!< 等待拿到 IP 的超时，毫秒 */
 
+    /*
+     * NTP 服务器主机名，用于把"开机毫秒"锚定成"Unix 毫秒"。
+     *
+     * 空串表示**不做时间同步**——这是受支持的用法，不是错误路径。
+     * 此时报文里的时间戳恒为开机毫秒，并由 `clock` 字段标注成 "boot"。
+     * 与 wifi_ssid 同理：让"还没配服务器"能正常编译、烧录、运行。
+     *
+     * 注意本工程 CONFIG_LWIP_SNTP_MAX_SERVERS=1，只能配一台。
+     */
+    const char *ntp_server;       /*!< NTP 服务器；空串表示不同步时间 */
+
     const uint32_t *periods_ms;   /*!< 闪烁周期表，按键按下时循环切换 */
     size_t period_count;          /*!< 周期表长度，必须 >= 1 */
 } app_config_t;
@@ -115,17 +126,23 @@ typedef struct {
  *                             （led_init / button_init / rgb_led_init /
  *                              dht11_init）
  *
- * @note WiFi 有两条特殊约定：
+ * @note 有三条特殊约定：
  *
- *       1. **ssid 为空表示不联网，是受支持的用法**。此时本函数不会失败，
- *          只是 telemetry_task 的报文里 "wifi" 恒为 false。
- *          只有 WiFi 真正初始化失败（比如内存不足）才返回错误。
+ *       1. **wifi_ssid 为空表示不联网，是受支持的用法**。此时本函数不会失败，
+ *          只是上报报文里 "wifi" 恒为 false。WiFi 真正初始化失败
+ *          （比如内存不足）才返回错误。
  *
  *       2. **等 IP 超时不算失败**。本函数会阻塞最多
  *          wifi_connect_timeout_ms 等一次 IP，好让第一行遥测报文就带上
  *          正确的 wifi 标志；超时只记一行告警就继续建任务。
  *          路由器后来自动连上时，wifi_mgr 的重连逻辑会把状态纠正过来。
  *          所以"启动耗时"的上界包含这个超时值。
+ *
+ *       3. **ntp_server 为空表示不做时间同步，同样是受支持的用法**。
+ *          此时报文时间戳恒为开机毫秒，`clock` 字段标成 "boot"。
+ *          NTP 同步失败（服务器不可达）也不返回错误——它只影响时间戳的
+ *          基准，不影响采集与上报。本函数**不等**同步完成：SNTP 是异步的，
+ *          等它会把启动时间拉长到不可预期。
  */
 esp_err_t app_start(const app_config_t *config);
 

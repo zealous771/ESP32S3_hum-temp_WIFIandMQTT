@@ -5,9 +5,9 @@
 #
 # 依赖说明：
 #
-#   PRIV_REQUIRES led button rgb_led settings dht11 wifi_mgr esp_timer
+#   PRIV_REQUIRES led button rgb_led settings dht11 wifi_mgr time_mgr esp_timer
 #     app.c 调用了 led_init() / button_init() / rgb_led_init() /
-#     dht11_init() / wifi_mgr_init() / settings_init()，
+#     dht11_init() / wifi_mgr_init() / time_mgr_init() / settings_init()，
 #     各任务文件分别调用了对应组件的接口。
 #     因为 app.h（公开头文件）里没有 include 这些组件的头文件，
 #     属于"只在源文件里用"，所以是私有依赖。
@@ -15,8 +15,9 @@
 #     那是多余的耦合。
 #
 #     注意 wifi_mgr 内部还依赖 esp_wifi / esp_netif / esp_event，
-#     但那三个是本组件看不见的——刚才那条"依赖不传递"的规则在这里
-#     正好起了作用：app 只关心"连上了没"，不关心 WiFi 栈长什么样。
+#     time_mgr 内部还依赖 esp_netif / lwip，
+#     但那些都是本组件看不见的——"依赖不传递"的规则在这里正好起作用：
+#     app 只关心"连上了没""几点了"，不关心 WiFi 栈和 SNTP 长什么样。
 #
 #     esp_timer 是 sensor_task.c 要的（esp_timer_get_time() 取时间戳）。
 #     它不是公共组件，必须显式声明，否则链接期报 undefined reference
@@ -38,4 +39,4 @@ idf_component_register(SRCS "src/app.c"
                             "src/telemetry_json.c"
                        INCLUDE_DIRS "include"
                        PRIV_INCLUDE_DIRS "src"
-                       PRIV_REQUIRES led button rgb_led settings dht11 wifi_mgr esp_timer)
+                       PRIV_REQUIRES led button rgb_led settings dht11 wifi_mgr time_mgr esp_timer)

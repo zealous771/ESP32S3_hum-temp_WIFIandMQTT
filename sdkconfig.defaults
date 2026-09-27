@@ -90,6 +90,16 @@ CONFIG_BOARD_SAMPLE_INTERVAL_MS=2000
 # 同一批设备不要重名，否则后端时序数据会混在一起。
 CONFIG_DEVICE_ID="esp32s3_001"
 
+# ---------- NTP 时间同步 ----------
+# 把设备的开机时钟锚定到绝对时间，报文时间戳才是 Unix 毫秒而不是
+# "开机以来的毫秒数"。多设备数据要在同一条时间轴上对齐，必须有这个。
+#
+# 本工程 CONFIG_LWIP_SNTP_MAX_SERVERS=1，**只能填一台**。
+# 留空则不进行同步，报文里的 clock 字段会标成 "boot"（受支持的用法）。
+# 换成局域网自建 NTP 也可以，比如路由器地址。
+CONFIG_NTP_SERVER="ntp.aliyun.com"
+CONFIG_NTP_SYNC_LOG_INTERVAL_S=60
+
 # ---------- WiFi 凭据 ----------
 # **故意留空**。
 #
