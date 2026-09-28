@@ -197,7 +197,27 @@ void app_mqtt_task(void *arg)
         char json[JSON_MAX];
         const int n = app_format_reading_json(json, sizeof(json), &d, &meta);
         if (n <= 0) {
-            /* 格式化函数内部已经说明原因（缓冲不够），这里不重复报 */
+            /*
+             * ★★ 格式化失败**必须显式出队**，否则这条永远卡在队首。
+             *
+             * 这是"peek + 成功后出队"这个模式必须配的纪律，很容易漏：
+             *
+             *   peek 不消费 → 下一轮拿到的还是同一条 → 又格式化失败 →
+             *   又 continue …… 无限循环，而且这个循环里**没有任何延时**，
+             *   会把 CPU 占满、把同优先级的其它任务挤到只剩时间片轮转。
+             *
+             * 表现极具迷惑性：MQTT 连接看起来是好的（esp-mqtt 的
+             * PINGREQ 还在发），但**一条数据都发不出去**，串口上也没有
+             * 任何错误——因为格式化函数把原因说过了，这里刻意没重复报。
+             *
+             * 所以：**peek 之后每一个"决定不处理这条"的分支，都要先出队。**
+             * 目前本函数有三个 continue，纪律是这样的：
+             *   - peek 返回失败  → 队列本来就空，无队可出
+             *   - 格式化失败     → 出队丢弃（本条）
+             *   - publish 失败   → **故意不出队**，留在队首重试（这才是 peek 的意义）
+             */
+            sensor_data_t discard;
+            (void)xQueueReceive(ctx->mqtt_queue, &discard, 0);
             continue;
         }
 
