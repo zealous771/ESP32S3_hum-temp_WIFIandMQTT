@@ -136,6 +136,38 @@ CONFIG_MONITOR_INTERVAL_MS=10000
 # 打开这个开关会让它**明确返回 -1**，而不是静默丢数据。
 CONFIG_MQTT_SKIP_PUBLISH_IF_DISCONNECTED=y
 
+# ---------- ★ 用增量 message id，而不是随机 id ----------
+#
+# 实测踩到的坑（2026-09-28）：设备连续发布 **41 分钟（约 1230 条）** 后
+# **彻底停止发送**，而本地一切正常——`mqtt_mgr_is_connected()` 为真、
+# 采样队列零丢弃、console 照常打印、broker 也还在收同一连接的 PINGREQ。
+# 也就是 `esp_mqtt_client_publish()` 返回了成功，但消息一条都没到 broker。
+# 重启设备立刻恢复。
+#
+# 原因：QoS1 的 publish 会在 esp-mqtt 内部的 outbox 里按 **message id** 记账。
+# esp-mqtt 默认用**随机的 16 位 id**（见组件 Kconfig 的 help 原文：
+# "as an incremental number rather then a random value (used by default)"），
+# 而 1230 条随机 id 落在 65536 的空间里，按生日悖论期望碰撞
+# 约 1230²/2/65536 ≈ 11 次。id 一撞，outbox 的记账就会错位，
+# 某条消息永久停在"未确认"状态，之后的发送全部卡住。
+#
+# 打开这个开关后 id 变成递增（1,2,3… 到 65535 回绕），
+# 在"同时只有一条在途"的用法下不会碰撞。
+CONFIG_MQTT_MSG_ID_INCREMENTAL=y
+
+# ---------- ★ 诊断：上报所有"从 outbox 里被删掉但没发成功"的消息 ----------
+#
+# 组件 Kconfig 原文：
+#   "Set this to true to post events for all messages which were deleted
+#    from the outbox before being correctly sent and confirmed."
+#
+# 打开后会发 MQTT_EVENT_DELETED 事件。它是上面那个问题的**决定性证据**：
+# 如果停发期间出现这个事件，就坐实了"消息死在 outbox 里"。
+#
+# 代价：正常情况下 outbox 不会丢消息，所以不会有额外日志；
+# 真出现时每条一行的量级，可接受。定位完之后可以关掉。
+CONFIG_MQTT_REPORT_DELETED_MESSAGES=y
+
 # ---------- WiFi 凭据 ----------
 # **故意留空**。
 #
