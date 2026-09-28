@@ -23,7 +23,6 @@
     "board/esp32s3-builtin.cfg"
   ],
   "idf.portWin": "COM9",
-  "idf.sdkconfigDefaults": "sdkconfig.defaults;sdkconfig.secret",
   "idf.currentSetup": "D:\\esp\\.espressif\\v6.1\\esp-idf",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32s3"
