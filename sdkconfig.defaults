@@ -107,8 +107,12 @@ CONFIG_NTP_SYNC_LOG_INTERVAL_S=60
 # 只是不发给 broker。填法：idf.py menuconfig → "MQTT broker"
 #
 # 填的时候**不要用 localhost**——那是 ESP32 自己。要填运行 broker
-# 那台机器在局域网里的地址（本机是 192.168.31.128，WSL2 里的 Docker）。
-CONFIG_MQTT_BROKER_URI="mqtt://192.168.31.128:1883"
+# 那台机器在局域网里的地址（WSL2 里的 Docker，经 portproxy 转发）。
+#
+# ★ 这里故意留空，真实地址写在**本机 sdkconfig** 里（不入库）——
+#   因为它随网络环境变：2026-10-03 换路由器后网段从 192.168.31.0/24
+#   变成 192.168.1.0/24，写死在这里就等于每次换网络都要改一次入库文件。
+CONFIG_MQTT_BROKER_URI=""
 CONFIG_MQTT_USERNAME=""
 CONFIG_MQTT_PASSWORD=""
 CONFIG_MQTT_CLIENT_ID_PREFIX=""
@@ -178,5 +182,11 @@ CONFIG_MQTT_REPORT_DELETED_MESSAGES=y
 # 填法：idf.py menuconfig → "WiFi 连接（凭据只存本机，不入库）"
 # 留空的效果：运行时不联网（main.c 会打一条 warning 说明），
 # 但 LED / 按键 / RGB / 温湿度采集与串口上报全部照常。
+#
+# ★ 2026-10-03 修正：这里曾被填进真实 SSID 和密码（提交 8eeb285），
+#   与上面这段说明**自相矛盾** —— 本文件是入库的，填进来就等于把
+#   密码提交进 git 历史。已清空。
+#   真实凭据只放 sdkconfig.secret（已 gitignore）或本机 sdkconfig。
+#   提交前请确认本文件里没有任何真实凭据。
 CONFIG_WIFI_SSID=""
 CONFIG_WIFI_PASSWORD=""

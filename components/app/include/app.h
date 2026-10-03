@@ -103,7 +103,7 @@ typedef struct {
      * 在 sdkconfig.defaults 中**故意留空**（那个文件是入库的）。
      * 真实地址和密码只写进本机 sdkconfig。
      */
-    const char *mqtt_uri;             /*!< broker URI，如 mqtt://192.168.31.128:1883；空串表示不启用 */
+    const char *mqtt_uri;             /*!< broker URI，如 mqtt://192.168.1.5:1883；空串表示不启用 */
     const char *mqtt_username;        /*!< 用户名；空串表示匿名连接 */
     const char *mqtt_password;        /*!< 密码；匿名连接传空串 */
     const char *mqtt_client_id_prefix;/*!< client_id 前缀；空串表示直接用 device_id */
