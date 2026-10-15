@@ -1,0 +1,37 @@
+# mqtt_mgr 组件的依赖清单
+#
+# 这个文件是 ESP-IDF **组件管理器**（Component Manager）用的，
+# 写法与 components/rgb_led/idf_component.yml 完全一致。
+#
+# ── 为什么必须走组件管理器 ──────────────────────────────────────
+#
+# **ESP-IDF v6.1 已经把 esp-mqtt 从核心里移出去了**。证据：
+#   D:\esp\.espressif\v6.1\esp-idf\docs\en\migration-guides\
+#       release-6.x\6.0\protocols.rst  第 231-248 行
+#
+#   "The ESP-MQTT component has been removed from ESP-IDF and is now a
+#    managed component: espressif/mqtt."
+#
+# 所以 components/ 目录里已经没有 mqtt 了（实测 grep 无任何命中），
+# 必须在这里声明依赖，构建时由组件管理器取回来。
+# 好消息是头文件和 API 没变，仍然是 #include "mqtt_client.h"。
+#
+# ── 版本号为什么写 ^1.0.0 ───────────────────────────────────────
+#
+# 本机是离线组件仓库：
+#   IDF_COMPONENT_LOCAL_STORAGE_URL = file://C:\Espressif\tools
+#   （由 C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1 设置，
+#     只在 ESP-IDF 的 PowerShell 激活终端里生效）
+#
+# 该仓库里 **只有 1.1.0 一个版本**：
+#   C:\Espressif\tools\components\espressif\mqtt.json
+#   C:\Espressif\tools\components\espressif\mqtt\1.1.0\espressif__mqtt-v1.1.0.zip
+#
+# 组件管理器的查找顺序是 **本地仓库 → profile → 在线注册表**，
+# 本地命中就不再联网。所以版本约束必须能被 1.1.0 满足：
+#   "^1.0.0" 或 "^1.1.0"  → 命中本地，离线可用
+#   "^1.2.0" / "^2.0.0"   → 本地没有，回退联网然后失败
+#
+# 语义化版本的写法同 rgb_led：^ 允许同主版本的向后兼容更新。
+dependencies:
+  espressif/mqtt: "^1.0.0"

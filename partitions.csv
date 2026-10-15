@@ -1,4 +1,4 @@
-﻿# ESP32-S3-N16R8 分区表（16MB Flash）
+# ESP32-S3-N16R8 分区表（16MB Flash）
 #
 # 为什么不用 IDF 自带的默认表：partitions_singleapp.csv 把 factory 写死为 1M，
 # 不随 Flash 容量变化，16MB 的板子会有 14MB 用不上。

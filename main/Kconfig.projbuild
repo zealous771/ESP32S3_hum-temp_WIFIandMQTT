@@ -1,0 +1,430 @@
+# 板级配置
+#
+# 这个文件是**本工程自己的 Kconfig 定义**，不是 IDF 的。
+# 放在 main/ 下、命名为 Kconfig.projbuild，会被构建系统收集并合并到
+# menuconfig 的**顶层**（而不是塞在 "Component config" 里面）。
+#
+# 命名区别值得记一下：
+#   Kconfig            组件内部配置，出现在 "Component config" 下
+#   Kconfig.projbuild  工程级配置，出现在 menuconfig 顶层
+#
+# 为什么要把引脚搬到这里？
+#
+#   之前这些值以 #define 写在 main.c 里，改一个引脚要动源码、重新编译。
+#   搬进 Kconfig 之后：
+#     1. 改配置不用碰代码，menuconfig 里点几下就行
+#     2. 每个选项能写 help 文本，解释"这个值该怎么填、有什么限制"
+#     3. 取值范围受 range 约束，填错会被 Kconfig 直接拦住
+#     4. 换块板子只需要一份不同的 sdkconfig.defaults，代码零改动
+#
+#   这正是官方示例（如 get-started/blink）的做法。
+#
+# 改完怎么生效？
+#   本工程 sdkconfig 不入库，所以完整流程是：
+#     1. menuconfig 里改（或直接改 sdkconfig.defaults）
+#     2. 改动只写进 sdkconfig（本机）
+#     3. 要固化就同步回 sdkconfig.defaults
+#     4. 删掉 sdkconfig 后重新构建才生效（defaults 不覆盖已存在的 sdkconfig）
+#
+# 代码里怎么读？
+#   #include "sdkconfig.h" 之后直接用 CONFIG_XXX。
+#   注意 IDF **不会**自动包含这个头文件（编译命令里既没有 -include 也没有
+#   -DCONFIG_xxx），所以必须自己 include。sdkconfig.h 由构建系统生成在
+#   build/config/ 下，该目录已在头文件搜索路径里。
+
+menu "板级配置（本工程的硬件接线）"
+
+    config BOARD_LED_GPIO
+        int "普通 LED 的 GPIO 编号"
+        range 0 48
+        default 2
+        help
+            外接 LED 接在哪个 GPIO 上。
+
+            ESP32-S3 上**不能随便用**的引脚：
+              GPIO26-32   SPI0/1 总线，接板载 Flash
+              GPIO33-37   八线 PSRAM 数据线（N16R8 占用了这 5 个）
+              GPIO19/20   USB-JTAG（本工程用它烧录和调试）
+              GPIO43/44   UART0 控制台
+              GPIO0/3/45/46  strapping 引脚，复位瞬间的电平决定启动模式
+
+            相对安全的选择：1、2、4-18、21、38-42、47、48。以原理图为准。
+
+    config BOARD_LED_ACTIVE_LEVEL
+        int "普通 LED 点亮时的电平（1 = 高电平点亮，0 = 低电平点亮）"
+        range 0 1
+        default 1
+        help
+            由硬件接线决定，两种接法完全相反：
+
+              拉电流（高电平点亮）—— 填 1
+                GPIO ──[限流电阻]──▶|── GND
+                GPIO 输出高，电流从引脚流出，灯亮
+
+              灌电流（低电平点亮）—— 填 0
+                3V3 ──[限流电阻]──▶|── GPIO
+                GPIO 输出低，电流从引脚流入地，灯亮
+
+            两者只是把 LED 和电阻对调了位置。
+
+            本板情况：
+              外接 LED 接 GPIO2，是高电平点亮，所以填 1。
+              板载 LED1/LED2 接在 UART 线上（U0RXD/U0TXD），
+              是串口收发指示灯，属于低电平点亮，但**不适合当用户 LED 用**。
+
+    config BOARD_BUTTON_GPIO
+        int "按键的 GPIO 编号"
+        range 0 48
+        default 0
+        help
+            KEY2（BOOT 键）接在 GPIO0。
+
+            注意 GPIO0 是 strapping 引脚：上电瞬间它的电平决定芯片是否进入
+            下载模式。作为运行期输入没问题，但**不要在复位时按住它**，
+            否则芯片会停在 ROM 下载模式，程序不启动。
+
+    config BOARD_BUTTON_ACTIVE_LEVEL
+        int "按键按下时的电平（0 = 低电平有效，1 = 高电平有效）"
+        range 0 1
+        default 0
+        help
+            由硬件接线决定：
+              按键一端接 GPIO、另一端接地 → 按下时引脚被拉低，填 0
+              按键一端接 GPIO、另一端接电源 → 按下时引脚被拉高，填 1
+
+            本板是前者（GPIO0 有 10k 外部上拉，按下接地），所以填 0。
+
+    config BOARD_BUTTON_DEBOUNCE_MS
+        int "按键去抖时间（毫秒）"
+        range 10 500
+        default 30
+        help
+            机械按键按下瞬间触点会弹跳几十次，表现为一串极短的边沿。
+            去抖的做法是"距上次事件不足 N 毫秒的边沿直接丢弃"。
+
+            本工程把去抖放在中断服务程序里用 tick 计数做纯算术判断，
+            成本只有几十条指令，能把绝大部分抖动挡在队列之外。
+
+            一般 20~50 ms 够用。设太小会重复触发，设太大会觉得按键迟钝。
+
+            **下限为什么是 10 而不是 1？**
+            因为 FreeRTOS 的 tick 频率是 100Hz（CONFIG_FREERTOS_HZ=100），
+            一个 tick 就是 10ms。而 pdMS_TO_TICKS 是向下取整的整数除法，
+            填 1~9 会被算成 0 个 tick，去抖判断就彻底失效了——
+            这种"看起来设了、实际没生效"的问题最难排查，所以直接从范围上禁掉。
+            button 组件里还有一道运行期校验兜底。
+
+    config BOARD_RGB_GPIO
+        int "可寻址 RGB 的 GPIO 编号"
+        range 0 48
+        default 48
+        help
+            板载 WS2812B 的数据线接在 GPIO48。
+
+            可寻址 RGB **不能**用普通 GPIO 的高低电平驱动——它靠单线串行
+            时序编码颜色，需要 RMT 这类能产生精确波形的外设。
+            详见 components/rgb_led/include/rgb_led.h。
+
+    config BOARD_RGB_LED_COUNT
+        int "可寻址 RGB 的灯珠数量"
+        range 1 64
+        default 1
+        help
+            板载那颗 RGB 是 1 颗。
+
+            如果外接一条灯带，这里改成实际数量（比如 8、16、60）。
+            数量影响驱动内部缓冲区大小：每颗灯 24 bit，
+            灯越多，RMT 需要的内存越多。
+
+    config BOARD_DHT11_GPIO
+        int "DHT11 温湿度传感器的数据引脚"
+        range 0 48
+        default 6
+        help
+            DHT11 是**单总线**器件：只用一根线，双向通信
+            （主机先拉低发起始信号，再释放总线上传感器回数据）。
+            所以它既不是 I2C 也不是 SPI，不需要时钟线。
+
+            本板接在 **GPIO6**：避开不可用引脚清单里的所有项——
+            不占 Flash 总线（GPIO26-32）、不占 PSRAM 数据线
+            （GPIO33-37）、不是 strapping 引脚，而且与
+            普通 LED(GPIO2)、按键(GPIO0)、RGB(GPIO48) 都不冲突。
+
+            接线要点（三条都是硬性要求，不是建议）：
+
+              1. **必须外接 5.1kΩ 上拉电阻**到 3.3V。
+                 DHT11 手册给出的就是这个值。总线靠上拉回到高电平，
+                 传感器和 ESP32 都只会把线拉低，不会主动拉高
+                 （开漏 / wired-AND）。
+                 代码里虽然启用了内部上拉兜底，但内部上拉约 45kΩ，
+                 比 5.1k 弱近十倍，上升沿太慢会导致误码。
+                 不接外部上拉时，最常见的症状是"偶尔能读到、
+                 经常校验和错误"。
+
+              2. **传感器供电用 3.3V，不要用 5V。**
+                 手册的供电范围是 3.3~5.5V，看起来 5V 也行，
+                 但手册的时序图里明确画了两条输入电平门限：
+                 高电平判为 1 需要达到 **70% VDD**，低于 30% VDD 判为 0。
+                   VDD=5V   → 阈值 3.5V，而 ESP32-S3 只输出 3.3V → 落在不确定区！
+                   VDD=3.3V → 阈值 2.31V，余量充足
+                 所以和 S3 用同一路 3.3V 最稳，也省掉电平转换。
+
+              3. **3.3V 供电时数据线不要超过 100cm。**
+                 这也是手册写明的（5V 时可到 20m）。
+                 线越长分布电容越大，边沿越缓，越容易误码。
+
+            另外建议在传感器 VCC 与 GND 之间并一个 100nF 去耦电容。
+
+    config BOARD_SAMPLE_INTERVAL_MS
+        int "温湿度采样周期（毫秒）"
+        range 2000 60000
+        default 2000
+        help
+            两次读取 DHT11 之间的间隔。
+
+            **下限为什么是 2000 而不是 1000？**
+            DHT11 手册写明采样周期应大于 2 秒，并且更严格地说
+            "不建议反复读取，间隔大于 5 秒才能获得准确的温湿度"。
+            （另一份手册给的最小值是 1.7 秒、典型 2 秒。）
+
+            关键在于**读太快不会报错**：传感器会返回上一次的
+            数据或者垃圾值，而不是返回错误码。这种"看起来一切正常、
+            实际拿的是旧值"的问题最难排查，所以直接从范围上禁掉，
+            dht11 驱动里还有一道运行期校验兜底。
+
+            想看最准的数据可以设成 5000。
+
+endmenu
+
+menu "设备标识（上报报文里的 device_id）"
+
+    config DEVICE_ID
+        string "设备标识"
+        default "esp32s3_001"
+        help
+            上报报文里 `device_id` 字段的值，用来在多设备场景下区分数据
+            来自哪一块板子。
+
+            为什么放在 Kconfig 而不是代码里写死？
+              和引脚号同理：它是"这台机器是谁"，属于部署信息，
+              不同板子要填不同的值。放 Kconfig 后换板子只需改配置，
+              源码零改动，而且能写 help 说明命名规则。
+
+            长度上限 **31 字节**——它在 sensor_data_t 里是 char[32]，
+            超长会被静默截断（截断的是报文里的标识，不会影响其它字段）。
+
+            命名建议（文档 §13 的 topic 里会用到这个值）：
+              带位置：  home_livingroom_01
+              带编号：  esp32s3_001
+              跟资产：  与你的资产台账保持一致
+            同一批设备**不要重名**，否则后端的时序数据会混在一起。
+
+            将来多设备部署时，可以让固件从 MAC 地址派生默认值
+            （esp_read_mac()），做到"烧同一份固件、自动区分设备"。
+            现在先手填，把链路跑通再说。
+
+endmenu
+
+menu "NTP 时间同步"
+
+    config NTP_SERVER
+        string "NTP 服务器主机名"
+        default "ntp.aliyun.com"
+        help
+            用来把设备的时间锚定到绝对时间（Unix 时间戳）。
+
+            **为什么需要它**：ESP32 上电时没有任何"当前时间"的概念，
+            只有一个从零开始计数的开机时钟。报文里如果只有相对时间，
+            后端就没法把多台设备的数据放进同一条时间轴，也没法做
+            "最近 30 分钟"这类查询。同步一次之后，时间戳就变成
+            Unix 毫秒（自 1970 年起），跨设备可对齐。
+
+            **留空则不进行时间同步**：设备照常采集与上报，
+            只是时间戳恒为开机毫秒，报文里的 clock 字段会标成 "boot"，
+            接收端一眼能看出来。
+
+            **只能填一台**——本工程 CONFIG_LWIP_SNTP_MAX_SERVERS=1，
+            这是 lwIP 的编译期配置。改它要动 sdkconfig（一般没必要）。
+            所以挑一台本地可达性好的：
+              国内：  ntp.aliyun.com / cn.pool.ntp.org / ntp.tencent.com
+              局域网：路由器自带 NTP，或自建的 chrony/ntpd
+
+            同步是**异步**的，不会拖慢启动。同步成功时串口会打一行
+            "时间已同步：Unix ... 秒"。看不到那行就说明服务器不可达——
+            设备会自己每 15~75 秒重试一次，网络恢复后自动补上。
+
+    config NTP_SYNC_LOG_INTERVAL_S
+        int "未同步告警的最小间隔（秒）"
+        range 10 600
+        default 60
+        help
+            长时间同步不上时，周期性提醒的最小间隔。
+
+            为什么要限速：NTP 服务器不可达时，设备会一直重试。
+            如果每次都打日志，串口会被同一条消息淹没，
+            真正的问题反而被盖住。所以按固定间隔提醒一次，
+            既能让人知道"时间还没同步"，又不会刷屏。
+
+            注意这只是**日志**的节流，不影响重试本身——
+            重试永远不停，见上面 NTP_SERVER 的说明。
+
+endmenu
+
+menu "MQTT broker（凭据只存本机，不入库）"
+
+    config MQTT_BROKER_URI
+        string "broker 地址（URI）"
+        default ""
+        help
+            形如 mqtt://192.168.1.5:1883
+
+            **留空则不启用 MQTT 上报**：设备照常采集、照常往串口打
+            完整报文，只是不发给 broker。这让"还没搭好 broker"也能
+            正常编译、烧录、运行。
+
+            **千万不要填 localhost 或 127.0.0.1**——那是 ESP32 自己，
+            不是你的电脑。要填运行 broker 那台机器在局域网里的地址。
+
+            怎么知道该填什么：
+              在跑 broker 的机器上执行 ipconfig（Windows）或 ip a（Linux），
+              找局域网网卡的 IPv4 地址。注意别填成 WSL 的虚拟网卡地址
+              （172.x 开头那种），那是 WSL 内部用的，设备访问不到——
+              要用 Windows 物理网卡的地址（换过路由器，当前是 192.168.1.5）。
+
+            ★ 这个地址会随路由器变。换路由器后必须重新烧录，
+              否则症状是"WiFi 连上了、但一条数据都发不出去"。
+
+            开发阶段用明文 mqtt:// 即可（文档 §39：不要把 1883 直接
+            暴露到公网）。正式部署再升级到 mqtts:// 的 8883 + 证书。
+
+            凭据去哪了：只写进本机 sdkconfig，而 sdkconfig 已在
+            .gitignore 里。**不要**把真实地址同步进 sdkconfig.defaults。
+
+    config MQTT_USERNAME
+        string "broker 用户名"
+        default ""
+        help
+            留空表示**匿名连接**。
+
+            开发阶段 Mosquitto 的默认配置就是允许匿名的
+            （allow_anonymous true），所以本项留空即可。
+            正式部署再按文档 §39 加用户名密码 / 设备证书 / ACL。
+
+    config MQTT_PASSWORD
+        string "broker 密码"
+        default ""
+        help
+            匿名连接留空。
+
+            同 WiFi 密码：只写进本机 sdkconfig，**绝不要**同步进
+            sdkconfig.defaults（那个文件是入库的）。
+
+    config MQTT_CLIENT_ID_PREFIX
+        string "client_id 前缀"
+        default ""
+        help
+            MQTT 规范要求 client_id 在同一个 broker 上唯一。
+            两个设备用同一个 client_id 连接时，后连上的会把先连上的
+            **踢下线**——表现为两台设备轮流掉线，日志里只有一条
+            语焉不详的 DISCONNECTED，非常难查。
+
+            所以默认（本项留空）**直接用 device_id 当 client_id**，
+            它本来就该是唯一的。
+
+            填了前缀则拼成 "<前缀>_<device_id>"。什么时候需要？
+            同一台设备跑两份固件做对比测试时——数据要归到同一台设备
+            名下（device_id 相同），但连接标识不能撞。
+
+    config MQTT_KEEPALIVE_S
+        int "心跳间隔（秒）"
+        range 15 600
+        default 60
+        help
+            作用有两个：
+              1. 让 broker 知道设备还活着，否则会被判定超时踢掉
+              2. **探测假死连接**——AP 还在但上行链路断了时，
+                 TCP 不会立刻报错，要等 keepalive×1.5 才发现
+
+            所以不能太大（假死发现得慢），也不能太小（流量与日志噪音）。
+            60 秒是常见折中。低于 30 秒在 2 秒一次的上报节奏下没有额外收益。
+
+    config MQTT_RECONNECT_TIMEOUT_MS
+        int "断线重试间隔（毫秒）"
+        range 1000 60000
+        default 5000
+        help
+            与 broker 断开后多久重试一次。
+
+            太小：broker 长时间不可用时日志会刷屏
+                  （本工程对断线日志做了限速，但重试本身仍耗电）。
+            太大：网络恢复后要等更久才重连上，丢的数据更多。
+
+            5 秒是"恢复快"和"日志干净"之间的折中。
+
+    config MQTT_NET_TIMEOUT_MS
+        int "单次网络操作超时（毫秒）"
+        range 1000 60000
+        default 10000
+        help
+            建立连接、收发单次数据的超时。
+
+            设太小会在网络稍慢时误判失败、反复重连；
+            设太大会让一次卡住的连接占住协议栈任务很久。
+
+            局域网内 10 秒很宽松；将来连公网 broker 可以适当加大。
+
+endmenu
+
+menu "系统监控（文档 §38）"
+
+    config MONITOR_INTERVAL_MS
+        int "监控打印周期（毫秒）"
+        range 2000 60000
+        default 10000
+        help
+            监控任务每隔这么久打两行：堆占用、各任务栈水位、WiFi 信号、
+            MQTT 状态、采样计数、复位原因。
+
+            **为什么需要它**：嵌入式最难查的三类问题是死机、重启、
+            内存不足，它们的共同点是"发生时你不在现场"。等发现设备
+            不对劲时，现场已经没了。所以必须在还正常的时候就周期性
+            留下这些数字，事后才能对着时间轴找出异常从什么时候开始。
+
+            10 秒是"信息够密"和"日志不吵"之间的折中：
+              - 太密（比如 1 秒）：日志被监控行淹没，反而看不清业务输出
+              - 太疏（比如 5 分钟）：重启前那几秒的关键数据可能没留下
+
+            下限设成 2000 而不是更小：监控任务的优先级低于所有业务任务，
+            周期太密会让它频繁醒来抢调度，而且 2 秒一次已经足够密了。
+
+endmenu
+
+menu "WiFi 连接（凭据只存本机，不入库）"
+
+    config WIFI_SSID
+        string "WiFi 名称 (SSID)"
+        default ""
+        help
+            要连接的路由器名称，最长 32 字节。
+
+            **留空则启动后不尝试联网**：设备照常跑 LED、按键、
+            RGB、温湿度采集，只是不打印联网状态。
+            这让"还没填密码"也能正常编译和运行。
+
+            凭据去哪了？
+              它只写进本机的 sdkconfig，而 sdkconfig 已在 .gitignore 里。
+
+              **千万不要把真实密码同步进 sdkconfig.defaults**——
+              那个文件是入库的，同步过去就等于把密码提交进了 git。
+
+    config WIFI_PASSWORD
+        string "WiFi 密码"
+        default ""
+        help
+            路由器密码，最长 64 字节。
+
+            开放网络（无密码）留空即可，此时会以无凭据方式连接。
+            若路由器是 WPA2/WPA3 加密的，这里必须填对，
+            否则会看到 WIFI_EVENT_STA_DISCONNECTED 和 reason 码。
+
+endmenu

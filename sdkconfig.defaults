@@ -60,3 +60,133 @@ CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT=y
 # 量产时改为 CONFIG_COMPILER_OPTIMIZATION_SIZE=y 或 _PERFORMANCE=y
 CONFIG_COMPILER_OPTIMIZATION_DEBUG=y
 CONFIG_COMPILER_OPTIMIZATION_DEFAULT=y
+
+# ---------- 板级配置（本工程的硬件接线） ----------
+# 这些选项定义在 main/Kconfig.projbuild 里，不写在这里也能编过（Kconfig 有
+# default）。写下来是为了让"新克隆的仓库"开箱就是这块板的接线，
+# 不用先跑一遍 menuconfig。
+#
+# 在 menuconfig 里改过的值只会写进 sdkconfig（本机，不入库），
+# 所以换板子时记得同步回这一节。
+CONFIG_BOARD_LED_GPIO=2
+CONFIG_BOARD_LED_ACTIVE_LEVEL=1
+CONFIG_BOARD_BUTTON_GPIO=0
+CONFIG_BOARD_BUTTON_ACTIVE_LEVEL=0
+CONFIG_BOARD_BUTTON_DEBOUNCE_MS=30
+CONFIG_BOARD_RGB_GPIO=48
+CONFIG_BOARD_RGB_LED_COUNT=1
+
+# DHT11 单总线数据引脚（本板接 GPIO6）。
+# 必须外接 5.1kΩ 上拉到 3.3V，传感器用 3.3V 供电，
+# 3.3V 时数据线不超过 100cm——理由见 Kconfig 的 help。
+CONFIG_BOARD_DHT11_GPIO=6
+
+# 采样周期。DHT11 手册要求大于 2 秒；读太快会静默返回旧值而不是报错。
+CONFIG_BOARD_SAMPLE_INTERVAL_MS=2000
+
+# ---------- 设备标识 ----------
+# 上报报文里的 device_id，多设备时用来区分数据来源。
+# 长度上限 31 字节（sensor_data_t.device_id 是 char[32]）。
+# 同一批设备不要重名，否则后端时序数据会混在一起。
+CONFIG_DEVICE_ID="esp32s3_001"
+
+# ---------- NTP 时间同步 ----------
+# 把设备的开机时钟锚定到绝对时间，报文时间戳才是 Unix 毫秒而不是
+# "开机以来的毫秒数"。多设备数据要在同一条时间轴上对齐，必须有这个。
+#
+# 本工程 CONFIG_LWIP_SNTP_MAX_SERVERS=1，**只能填一台**。
+# 留空则不进行同步，报文里的 clock 字段会标成 "boot"（受支持的用法）。
+# 换成局域网自建 NTP 也可以，比如路由器地址。
+CONFIG_NTP_SERVER="ntp.aliyun.com"
+CONFIG_NTP_SYNC_LOG_INTERVAL_S=60
+
+# ---------- MQTT 上报 ----------
+# **地址与凭据故意留空**（同 WiFi 凭据的理由：本文件是入库的）。
+#
+# 留空的效果：不启用 MQTT 上报。设备照常采集、照常往串口打完整报文，
+# 只是不发给 broker。填法：idf.py menuconfig → "MQTT broker"
+#
+# 填的时候**不要用 localhost**——那是 ESP32 自己。要填运行 broker
+# 那台机器在局域网里的地址（WSL2 里的 Docker，经 portproxy 转发）。
+#
+# ★ 这里故意留空，真实地址写在**本机 sdkconfig** 里（不入库）——
+#   因为它随网络环境变：2026-10-03 换路由器后网段从 192.168.31.0/24
+#   变成 192.168.1.0/24，写死在这里就等于每次换网络都要改一次入库文件。
+CONFIG_MQTT_BROKER_URI=""
+CONFIG_MQTT_USERNAME=""
+CONFIG_MQTT_PASSWORD=""
+CONFIG_MQTT_CLIENT_ID_PREFIX=""
+CONFIG_MQTT_KEEPALIVE_S=60
+CONFIG_MQTT_RECONNECT_TIMEOUT_MS=5000
+CONFIG_MQTT_NET_TIMEOUT_MS=10000
+
+# ---------- 系统监控（文档 §38） ----------
+# 监控任务周期性打印堆占用、各任务栈水位、WiFi/MQTT 状态、采样计数、
+# 复位原因。这些是排查"死机/重启/内存不足"的唯一线索——
+# 那类问题发生时人不在现场，只能靠事先留下的周期性快照事后回溯。
+#
+# 调栈大小时主要看它的输出：栈水位越接近 0 越危险，余量留 30% 以上。
+CONFIG_MONITOR_INTERVAL_MS=10000
+
+# ---------- esp-mqtt 组件行为 ----------
+# 未连接时**跳过 publish**，而不是把消息塞进内部 outbox。
+#
+# 为什么必须打开：esp-mqtt 的默认行为是"尽力发送"——未连接时 QoS1/2
+# 的消息会进 outbox 排队，publish 返回一个正常的 msg_id（≥0），
+# 然后 30 秒后静默过期丢弃。也就是说只看返回值分不出"发出去了"和"丢了"。
+#
+# 本工程在 mqtt_mgr_publish() 里已经先查连接状态挡住了这种情况，
+# 这里是第二道防线：万一将来有人绕过封装直接调 esp_mqtt_client_publish()，
+# 打开这个开关会让它**明确返回 -1**，而不是静默丢数据。
+CONFIG_MQTT_SKIP_PUBLISH_IF_DISCONNECTED=y
+
+# ---------- ★ 用增量 message id，而不是随机 id ----------
+#
+# 实测踩到的坑（2026-09-28）：设备连续发布 **41 分钟（约 1230 条）** 后
+# **彻底停止发送**，而本地一切正常——`mqtt_mgr_is_connected()` 为真、
+# 采样队列零丢弃、console 照常打印、broker 也还在收同一连接的 PINGREQ。
+# 也就是 `esp_mqtt_client_publish()` 返回了成功，但消息一条都没到 broker。
+# 重启设备立刻恢复。
+#
+# 原因：QoS1 的 publish 会在 esp-mqtt 内部的 outbox 里按 **message id** 记账。
+# esp-mqtt 默认用**随机的 16 位 id**（见组件 Kconfig 的 help 原文：
+# "as an incremental number rather then a random value (used by default)"），
+# 而 1230 条随机 id 落在 65536 的空间里，按生日悖论期望碰撞
+# 约 1230²/2/65536 ≈ 11 次。id 一撞，outbox 的记账就会错位，
+# 某条消息永久停在"未确认"状态，之后的发送全部卡住。
+#
+# 打开这个开关后 id 变成递增（1,2,3… 到 65535 回绕），
+# 在"同时只有一条在途"的用法下不会碰撞。
+CONFIG_MQTT_MSG_ID_INCREMENTAL=y
+
+# ---------- ★ 诊断：上报所有"从 outbox 里被删掉但没发成功"的消息 ----------
+#
+# 组件 Kconfig 原文：
+#   "Set this to true to post events for all messages which were deleted
+#    from the outbox before being correctly sent and confirmed."
+#
+# 打开后会发 MQTT_EVENT_DELETED 事件。它是上面那个问题的**决定性证据**：
+# 如果停发期间出现这个事件，就坐实了"消息死在 outbox 里"。
+#
+# 代价：正常情况下 outbox 不会丢消息，所以不会有额外日志；
+# 真出现时每条一行的量级，可接受。定位完之后可以关掉。
+CONFIG_MQTT_REPORT_DELETED_MESSAGES=y
+
+# ---------- WiFi 凭据 ----------
+# **故意留空**。
+#
+# 凭据只写进本机 sdkconfig（已被 .gitignore 排除），
+# 千万不要把真实密码同步到本文件——本文件是入库的，
+# 同步过来就等于把密码提交进了 git。
+#
+# 填法：idf.py menuconfig → "WiFi 连接（凭据只存本机，不入库）"
+# 留空的效果：运行时不联网（main.c 会打一条 warning 说明），
+# 但 LED / 按键 / RGB / 温湿度采集与串口上报全部照常。
+#
+# ★ 2026-10-03 修正：这里曾被填进真实 SSID 和密码（提交 8eeb285），
+#   与上面这段说明**自相矛盾** —— 本文件是入库的，填进来就等于把
+#   密码提交进 git 历史。已清空。
+#   真实凭据只放 sdkconfig.secret（已 gitignore）或本机 sdkconfig。
+#   提交前请确认本文件里没有任何真实凭据。
+CONFIG_WIFI_SSID=""
+CONFIG_WIFI_PASSWORD=""

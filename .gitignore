@@ -36,6 +36,18 @@ build/
 sdkconfig
 sdkconfig.old
 
+# 本机凭据（WiFi 密码、broker 地址）。**绝不能入库**。
+#
+# 为什么单独一个文件：sdkconfig 被删掉重建时（换机器、排 kconfig 问题、
+# fullclean 等），Kconfig 只会读 sdkconfig.defaults，而那里凭据是故意
+# 留空的——于是 WiFi 和 MQTT 静默失效：设备照常跑、串口照常打，
+# 只是不上报。实测踩过一次，排查花了不少时间。
+#
+# 有了这个文件，只要构建时设了
+#   SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.secret"
+# 重建出来的 sdkconfig 就自带凭据。
+sdkconfig.secret
+
 # ESP-IDF dependencies
 # For older versions or manual component management
 /components/.idf/

@@ -1,160 +1,189 @@
 /*
  * main.c —— 工程入口
  *
- * 本示例演示 ESP-IDF 的"中断 + 任务间通信"标准模式：
+ * 这个文件只做两件事：
+ *   1. 把板级配置（引脚、周期表）装进 app_config_t
+ *   2. 调用 app_start() 把控制权交给应用层
  *
- *     按键 GPIO ──中断──▶ ISR ──队列──▶ button_task ──队列──▶ blink_task ──▶ LED
+ * 业务逻辑不在这里，在 components/app/ 下：
+ *   app.c           编排：初始化外设、建队列、创建任务
+ *   blink_task.c    闪烁任务
+ *   button_task.c   按键任务
+ *   rgb_task.c      可寻址 RGB 任务
+ *   sensor_task.c   温湿度采样任务（生产者：只采集，不输出）
+ *   console_task.c  串口消费者（把记录打成 JSON，不依赖网络）
+ *   mqtt_task.c     MQTT 消费者（把记录 publish 到 broker）
  *
- * 两个队列各自承担不同职责：
- *   button 组件内部的队列：传递"按下/松开"事件（ISR → 任务）
- *   本文件里的 s_period_queue：传递"新的闪烁周期"（任务 → 任务）
+ * 为什么这样分：main 在 ESP-IDF 里是个特殊组件（总是被编译、总是第一个运行）。
+ * 如果把任务都堆在这里，每加一个功能入口文件就长一截，很快读不动了。
+ * 拆开之后，加新任务只改 app 组件，这个文件保持不变。
  *
- * 其中 blink_task 的写法是本示例最值得琢磨的地方，见函数内注释。
+ * 板级配置从哪来？
+ *
+ *   引脚号、去抖时间这些**不再写死在代码里**，而是定义在同目录的
+ *   main/Kconfig.projbuild 里。menuconfig 里改一下就行，不用动源码。
+ *
+ *   读法是直接用 CONFIG_ 开头的宏——它们来自构建系统生成的 sdkconfig.h。
+ *   注意 IDF **不会**自动包含那个头文件：编译命令里既没有 -include
+ *   sdkconfig.h，也没有 -DCONFIG_xxx。所以下面必须显式 include。
+ *   （生成位置是 build/config/sdkconfig.h，该目录已在头文件搜索路径里。）
+ *
+ * 数据流（跨六个组件）：
+ *
+ *   按键 GPIO ──中断──▶ button 组件 ISR ──队列──▶ app/button_task
+ *                                                      │
+ *                                                  队列（新周期）
+ *                                                      ▼
+ *                        led 组件 ◀── app/blink_task ◀──┘
+ *
+ *   RGB GPIO ◀── RMT 外设 ◀── rgb_led 组件 ◀── app/rgb_task（独立循环色相）
+ *
+ *   ┌────────── 采样管道（一个生产者 / 两个消费者）────────────┐
+ *   │                                                          │
+ *   │  DHT11 数据线 ◀── 单总线时序 ◀── dht11 组件               │
+ *   │                                    │                     │
+ *   │                              app/sensor_task             │
+ *   │                              （只采样，绝不阻塞）          │
+ *   │                                    │                     │
+ *   │                     ┌──────────────┴──────────────┐      │
+ *   │                     ▼                             ▼      │
+ *   │            Queue console_queue          Queue mqtt_queue │
+ *   │                     │                             │      │
+ *   │             app/console_task                app/mqtt_task│
+ *   │             （格式化成 JSON 打串口）      （publish 到    │
+ *   │              不依赖网络，断网时照常打印      broker）     │
+ *   └──────────────────────────────────────────────────────────┘
+ *
+ *   为什么是两条队列而不是一条加两个消费者：xQueueReceive 是**出队**
+ *   语义，两个任务读同一条队列会变成瓜分数据而不是广播。
+ *   详见 components/app/src/app_internal.h。
+ *
+ *   两个消费者还有一个刻意的行为差异：mqtt_task 在未连接时**不消费**
+ *   队列（让它积压，重连后补发），而 console_task 永远在消费。
+ *   于是"网络断了导致丢数据"只影响上报那一路，串口照常一行一行地打——
+ *   两种故障因此可以被区分开。
+ *
+ *   WiFi ◀── wifi_mgr 组件（Station 模式）
+ *   NTP  ◀── time_mgr 组件（SNTP，把开机毫秒锚定成 Unix 毫秒）
+ *   broker ◀── mqtt_mgr 组件（连接管理 + publish，带 LWT 在线状态）
  */
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/queue.h"
+#include <stdint.h>
+
+#include "sdkconfig.h"
 
 #include "esp_err.h"
 #include "esp_log.h"
 
-#include "led.h"
-#include "button.h"
+#include "app.h"
 
+/* 日志标签。约定用文件名，方便在串口输出里过滤。 */
 static const char *TAG = "main";
 
-/* ---------- 硬件配置 ---------- */
-
 /*
- * 外接 LED 的引脚。你的板子上板载 LED 接在 UART 线上（U0TXD/U0RXD），
- * 那是串口收发指示灯，不适合当用户 LED 用，所以这里用外接 LED。
- * 安全可用的 GPIO：1、2、4-18、21、38-42、47、48。
- * 注意 GPIO33-37 被八线 PSRAM 占用，GPIO26-32 是 Flash 总线。
- */
-#define LED_GPIO 2
-
-/*
- * 按键引脚。你板子上的 KEY2 就是 BOOT 按键，接 GPIO0，低电平有效。
+ * 闪烁周期可选项，按键按下时循环切换。
  *
- * 注意 GPIO0 是 strapping 引脚：上电瞬间它的电平决定芯片是否进入下载模式。
- * 作为运行期输入完全没问题（刚才实测空闲为高电平），但**不要在复位时按住它**，
- * 否则芯片会停在 ROM 下载模式，程序不启动。
+ * 这个没有做成 Kconfig 选项——Kconfig 擅长标量和布尔值，
+ * 表达"一个变长列表"很别扭。硬编码在代码里反而更清楚。
  */
-#define BUTTON_GPIO 0
-#define BUTTON_ACTIVE_LEVEL 0     /* 0 = 低电平有效（按键接地） */
-#define BUTTON_DEBOUNCE_MS 30
-
-/* 闪烁周期可选项，按键循环切换 */
 static const uint32_t k_periods_ms[] = {1000, 500, 200, 100};
-#define PERIOD_COUNT (sizeof(k_periods_ms) / sizeof(k_periods_ms[0]))
 
-/* 任务 → 任务：传递新的闪烁周期 */
-static QueueHandle_t s_period_queue = NULL;
-
-/**
- * @brief 闪烁任务
+/*
+ * 等待拿到 IP 的超时。
  *
- * 关键看这里怎么"定时"。
- *
- * 直觉写法是 vTaskDelay(period) 然后循环。但那样有个问题：
- * 如果当前周期是 1000ms，按键改了周期，最坏要等 1 秒才生效。
- *
- * 这里用 xQueueReceive() 的超时参数充当延时：
- *   - 队列里没数据 → 超时返回 pdFALSE，相当于睡了 period 毫秒
- *   - 队列里有数据 → 立刻返回 pdTRUE，不用等满
- *
- * 于是"定时"和"响应事件"合并成了一次调用，周期改变**立即生效**。
- * 这是 RTOS 里非常常用的手法——用一个带超时的阻塞调用，
- * 同时实现"周期性动作"和"可被打断的等待"。
+ * 这个不是"板级信息"（跟引脚无关），所以留在代码里而不是 Kconfig。
+ * 15 秒足够覆盖路由器 DHCP 较慢的情况；超时也不影响设备其它功能，
+ * 只是串口里不会出现 IP 那一行。
  */
-static void blink_task(void *arg)
-{
-    (void)arg;
+#define WIFI_CONNECT_TIMEOUT_MS 15000
 
-    uint32_t period_ms = k_periods_ms[0];
-    ESP_LOGI(TAG, "闪烁任务启动，初始周期 %u ms", (unsigned)period_ms);
-
-    while (1) {
-        ESP_ERROR_CHECK(led_toggle());
-        ESP_LOGI(TAG, "LED %s", led_is_on() ? "亮" : "灭");
-
-        uint32_t new_period;
-        if (xQueueReceive(s_period_queue, &new_period, pdMS_TO_TICKS(period_ms)) == pdTRUE) {
-            period_ms = new_period;
-            ESP_LOGI(TAG, "周期切换为 %u ms，立即生效", (unsigned)period_ms);
-        }
-    }
-}
-
-/**
- * @brief 按键处理任务
+/*
+ * SSID 没填时提醒一句。
  *
- * 它只做一件事：等按键事件，按下就切换周期。
- * 真正的按键识别（读电平、去抖）已经在 ISR 里完成了，
- * 这里拿到的都是"已经确认过的事件"。
+ * 为什么是**运行期**判断而不是 #if 编译期判断？
+ *   CONFIG_WIFI_SSID 是 Kconfig 的 string 类型，展开后是字符串字面量
+ *   （"" 或 "MyAP" 这样）。而 C 的预处理器**不认识字符串字面量**：
+ *   写 `#if CONFIG_WIFI_SSID[0] == '\0'` 会直接报
+ *       error: token '""' is not valid in preprocessor expressions
+ *   整个编译都过不去（本工程实测撞过这个坑）。
+ *   sizeof() 虽然能进 #if，但它不能作用于 #if 里的字符串比较；
+ *   总之"字符串内容"这类判断天生属于运行期。
+ *
+ * 为什么值得提醒？因为"忘了填 SSID"的表现是——编译、烧录、运行全部正常，
+ * 只是永远连不上，串口里一个错都不报。这种静默失败最费排查时间。
  */
-static void button_task(void *arg)
+static void warn_if_ssid_empty(void)
 {
-    (void)arg;
-
-    QueueHandle_t evq = button_get_event_queue();
-    if (evq == NULL) {
-        ESP_LOGE(TAG, "按键事件队列为空，任务退出");
-        vTaskDelete(NULL);
-        return;
-    }
-
-    ESP_LOGI(TAG, "按键任务启动，按下 BOOT 键切换闪烁周期");
-
-    int idx = 0;
-    while (1) {
-        button_event_t ev;
-        /* portMAX_DELAY = 无限等待。本任务平时完全休眠，不占 CPU，
-         * 只有按键事件到来时才会被唤醒。这是事件驱动任务的标准写法。 */
-        if (xQueueReceive(evq, &ev, portMAX_DELAY) != pdTRUE) {
-            continue;
-        }
-
-        /* 只处理按下，松开事件忽略 */
-        if (ev != BUTTON_EVENT_PRESSED) {
-            continue;
-        }
-
-        idx = (idx + 1) % PERIOD_COUNT;
-        uint32_t p = k_periods_ms[idx];
-        ESP_LOGI(TAG, "按键按下 → 请求切换到 %u ms", (unsigned)p);
-
-        /* 发给闪烁任务。超时传 0：队列满就丢弃，绝不在这里阻塞 */
-        xQueueSend(s_period_queue, &p, 0);
+    if (CONFIG_WIFI_SSID[0] == '\0') {
+        ESP_LOGW(TAG, "未配置 WiFi 名称（CONFIG_WIFI_SSID 为空），本次不联网；"
+                      "填法：idf.py menuconfig → WiFi 连接");
     }
 }
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "app_main 开始");
-
-    ESP_ERROR_CHECK(led_init(LED_GPIO));
-
-    s_period_queue = xQueueCreate(4, sizeof(uint32_t));
-    if (s_period_queue == NULL) {
-        ESP_LOGE(TAG, "创建周期队列失败");
-        return;
-    }
-
-    const button_config_t btn_cfg = {
-        .gpio_num = BUTTON_GPIO,
-        .active_level = BUTTON_ACTIVE_LEVEL,
-        .debounce_ms = BUTTON_DEBOUNCE_MS,
-    };
-    ESP_ERROR_CHECK(button_init(&btn_cfg));
+    warn_if_ssid_empty();
 
     /*
-     * 创建两个任务。优先级给相同的 5——它们互不抢占，
-     * 靠队列阻塞自然协作。如果按键要求响应更快，可以把 button_task 提到 6。
+     * 把配置装起来交给应用层。
+     *
+     * 注意这里 app 组件**完全不知道**这些值是什么——引脚接在哪、
+     * 去抖多久、连哪个 AP，都是"这台机器特有的信息"，由调用方注入。
+     * 所以 components/app/ 整个目录可以原样复制到别的工程。
      */
-    xTaskCreate(blink_task,  "blink",  2048, NULL, 5, NULL);
-    xTaskCreate(button_task, "button", 3072, NULL, 5, NULL);
+    const app_config_t cfg = {
+        .led_gpio            = CONFIG_BOARD_LED_GPIO,
+        .led_active_level    = CONFIG_BOARD_LED_ACTIVE_LEVEL,
+        .button_gpio         = CONFIG_BOARD_BUTTON_GPIO,
+        .button_active_level = CONFIG_BOARD_BUTTON_ACTIVE_LEVEL,
+        .button_debounce_ms  = CONFIG_BOARD_BUTTON_DEBOUNCE_MS,
+        .rgb_gpio            = CONFIG_BOARD_RGB_GPIO,
+        .rgb_led_count       = CONFIG_BOARD_RGB_LED_COUNT,
 
-    /* app_main 返回，main 任务结束，上面两个任务继续运行 */
-    ESP_LOGI(TAG, "app_main 返回，blink_task 与 button_task 继续运行");
+        .dht11_gpio          = CONFIG_BOARD_DHT11_GPIO,
+        .sample_interval_ms  = CONFIG_BOARD_SAMPLE_INTERVAL_MS,
+
+        /*
+         * 设备标识。和引脚一样属于"这台机器是谁"，所以也走 Kconfig，
+         * 而不是在组件里写死或用 MAC 拼一个——那样等于替调用方做了
+         * 一个它不该做的命名决定。
+         */
+        .device_id           = CONFIG_DEVICE_ID,
+
+        .wifi_ssid               = CONFIG_WIFI_SSID,
+        .wifi_password           = CONFIG_WIFI_PASSWORD,
+        .wifi_connect_timeout_ms = WIFI_CONNECT_TIMEOUT_MS,
+
+        /*
+         * NTP 服务器。留空表示不做时间同步，报文时间戳为开机毫秒
+         * （clock 字段标成 "boot"）——这是受支持的用法，不是错误。
+         */
+        .ntp_server              = CONFIG_NTP_SERVER,
+
+        /*
+         * MQTT 上报。uri 留空表示不启用上报（受支持的用法）——
+         * 设备照常采集并往串口打报文，只是不发给 broker。
+         *
+         * 和 WiFi 凭据一样，真实地址/密码只写进本机 sdkconfig；
+         * sdkconfig.defaults 里这几项**故意留空**。
+         */
+        .mqtt_uri                 = CONFIG_MQTT_BROKER_URI,
+        .mqtt_username            = CONFIG_MQTT_USERNAME,
+        .mqtt_password            = CONFIG_MQTT_PASSWORD,
+        .mqtt_client_id_prefix    = CONFIG_MQTT_CLIENT_ID_PREFIX,
+        .mqtt_keepalive_s         = CONFIG_MQTT_KEEPALIVE_S,
+        .mqtt_reconnect_timeout_ms = CONFIG_MQTT_RECONNECT_TIMEOUT_MS,
+        .mqtt_net_timeout_ms      = CONFIG_MQTT_NET_TIMEOUT_MS,
+
+        /* 系统监控周期（文档 §38） */
+        .monitor_interval_ms      = CONFIG_MONITOR_INTERVAL_MS,
+
+        .periods_ms          = k_periods_ms,
+        .period_count        = sizeof(k_periods_ms) / sizeof(k_periods_ms[0]),
+    };
+
+    /*
+     * app_start() 返回时各任务已在运行，app_main 可以直接返回——
+     * app_main 返回不等于程序结束，main 任务会被 FreeRTOS 自行删除。
+     */
+    ESP_ERROR_CHECK(app_start(&cfg));
 }
